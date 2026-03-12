@@ -20,13 +20,11 @@ except ImportError:
     filedialog = None
 
 
+from game import SNAKE_COLORS
+
 # 颜色
 BG = (28, 28, 32)
 GRID_LINE = (48, 48, 56)
-SNAKE_HEAD = (76, 175, 80)
-SNAKE_BODY = (56, 142, 60)
-FOOD = (244, 67, 54)
-X2 = (255, 193, 7)
 TEXT = (220, 220, 220)
 TEXT_DIM = (140, 140, 140)
 CORRECT = (76, 175, 80)
@@ -37,11 +35,141 @@ BTN_HOVER = (78, 78, 88)
 # 标注原因中文说明（用括号避免 ✓✗ 等符号在部分字体下乱码）
 REASON_NAMES = {
     "ate_x2_then_food": "先吃x2再吃食物 (对)",
-    "ate_food_no_x2": "无x2时吃食物 (对)",
+    "ate_food_no_x2": "吃食物 (对)",
+    "in_progress": "进行中",
     "self_collision": "撞到自己 (错)",
+    "snake_collision": "蛇间碰撞 (错)",
     "x2_wasted": "先吃食物导致x2浪费 (错)",
     "timeout": "超时未吃食物 (错)",
 }
+
+
+def _get_total_score(scene: dict) -> int:
+    """兼容新格式 snakes / 旧格式 snake+score"""
+    if "snakes" in scene:
+        return sum(s.get("score", 0) for s in scene["snakes"])
+    return scene.get("score", 0)
+
+
+def _any_snake_had_x2(scene: dict) -> bool:
+    """兼容新格式 snakes / 旧格式 x2"""
+    if "snakes" in scene:
+        return any(s.get("x2") is not None for s in scene["snakes"])
+    return scene.get("x2") is not None
+
+
+def _get_food(scene: dict, snake_idx: int) -> list[int] | None:
+    """获取指定蛇的食物坐标"""
+    if "snakes" in scene and snake_idx < len(scene["snakes"]):
+        return scene["snakes"][snake_idx].get("food")
+    if snake_idx == 0:
+        return scene.get("food")
+    return None
+
+
+def infer_annotation_so_far(
+    scenes: list[dict], up_to_idx: int, episode_label: str, episode_reason: str
+) -> tuple[str, str]:
+    """
+    推断单蛇「当前食物」的标注。只针对当前这波食物，不用首/末标注。
+    """
+    if not scenes or up_to_idx < 0:
+        return "correct", "in_progress"
+    n = len(scenes)
+    up_to_idx = min(up_to_idx, n - 1)
+    if up_to_idx == n - 1 and episode_reason in ("self_collision", "snake_collision", "timeout"):
+        return episode_label, episode_reason
+
+    # 找到当前食物这波的起点（食物位置变化处）
+    wave_start = 0
+    for k in range(1, up_to_idx + 1):
+        if _get_food(scenes[k - 1], 0) != _get_food(scenes[k], 0):
+            wave_start = k
+
+    x2_wasted = False
+    used_x2_ok = False
+    any_eat = False
+    for k in range(wave_start, up_to_idx):
+        a, b = scenes[k], scenes[k + 1]
+        score_a = _get_total_score(a)
+        score_b = _get_total_score(b)
+        ds = score_b - score_a
+        had_x2 = _any_snake_had_x2(a)
+        if ds == 1 and had_x2:
+            x2_wasted = True
+            any_eat = True
+        elif ds == 2:
+            used_x2_ok = True
+            any_eat = True
+        elif ds == 1:
+            any_eat = True
+
+    if x2_wasted:
+        return "incorrect", "x2_wasted"
+    if used_x2_ok:
+        return "correct", "ate_x2_then_food"
+    if any_eat:
+        return "correct", "ate_food_no_x2"
+    return "correct", "in_progress"
+
+
+def infer_snake_annotations_so_far(
+    scenes: list[dict], up_to_idx: int, final_snake_annotations: list[dict]
+) -> list[dict]:
+    """
+    推断每条蛇「当前食物」的标注。只针对当前这波食物，不用首/末标注。
+    """
+    if not scenes or up_to_idx < 0 or not final_snake_annotations:
+        return final_snake_annotations
+    n = len(scenes)
+    up_to_idx = min(up_to_idx, n - 1)
+    num_snakes = len(final_snake_annotations)
+
+    # 最后一帧且是碰撞/超时：无法从得分推断，用存储的标注
+    unreachable_reasons = ("self_collision", "snake_collision", "timeout")
+    if up_to_idx == n - 1 and any(
+        a.get("reason") in unreachable_reasons for a in final_snake_annotations
+    ):
+        return final_snake_annotations
+
+    first_scene = scenes[0]
+    if "snakes" not in first_scene or len(first_scene["snakes"]) < num_snakes:
+        lbl, rsn = infer_annotation_so_far(
+            scenes, up_to_idx,
+            final_snake_annotations[0].get("label", "correct"),
+            final_snake_annotations[0].get("reason", "ate_food_no_x2"),
+        )
+        return [{"label": lbl, "reason": rsn}]
+
+    result: list[dict] = []
+    for i in range(num_snakes):
+        # 找到当前食物这波的起点
+        wave_start = 0
+        for k in range(1, up_to_idx + 1):
+            if _get_food(scenes[k - 1], i) != _get_food(scenes[k], i):
+                wave_start = k
+
+        first_err: str | None = None
+        last_ok = "in_progress"
+        for k in range(wave_start, up_to_idx):
+            a, b = scenes[k], scenes[k + 1]
+            sa = a["snakes"][i] if i < len(a.get("snakes", [])) else {}
+            sb = b["snakes"][i] if i < len(b.get("snakes", [])) else {}
+            score_a = sa.get("score", 0)
+            score_b = sb.get("score", 0)
+            delta = score_b - score_a
+            had_x2 = sa.get("x2") is not None
+            if delta == 1 and had_x2:
+                first_err = "x2_wasted"
+            elif delta == 2:
+                last_ok = "ate_x2_then_food"
+            elif delta == 1:
+                last_ok = "ate_food_no_x2"
+        result.append({
+            "label": "incorrect" if first_err else "correct",
+            "reason": first_err or last_ok,
+        })
+    return result
 
 
 def load_dataset(path: str | Path) -> tuple[list[dict], Path | None]:
@@ -95,18 +223,25 @@ def draw_scene(
     current_path: str | None,
     open_btn_rect: pygame.Rect,
     btn_hover: bool,
+    snake_annotations: list[dict] | None = None,
 ) -> None:
     screen.fill(BG)
 
-    snake = scene.get("snake", [])
-    food = scene.get("food", [0, 0])
-    x2 = scene.get("x2")
-    score = scene.get("score", 0)
+    # 兼容新格式 snakes / 旧格式 snake
+    snakes_data = scene.get("snakes")
+    if snakes_data is None:
+        snakes_data = [{
+            "body": scene.get("snake", []),
+            "food": scene.get("food", [0, 0]),
+            "x2": scene.get("x2"),
+            "score": scene.get("score", 0),
+            "color_id": 0,
+        }]
+    total_score = sum(s.get("score", 0) for s in snakes_data)
     step = scene.get("step", scene_idx)
     grid_y = margin_y
 
     # 左侧：纯游戏网格，无任何覆盖
-    # 绘制网格
     for x in range(grid_w + 1):
         pygame.draw.line(
             screen, GRID_LINE,
@@ -120,31 +255,37 @@ def draw_scene(
             (margin_x + grid_w * cell_size, grid_y + y * cell_size),
         )
 
-    # 食物
-    if food:
-        fx, fy = food[0] % grid_w, food[1] % grid_h
-        rect = (margin_x + fx * cell_size + 2, grid_y + fy * cell_size + 2,
-                cell_size - 4, cell_size - 4)
-        pygame.draw.rect(screen, FOOD, rect, border_radius=4)
+    # 先画食物和 x2（避免挡住蛇身）
+    for s in snakes_data:
+        cid = s.get("color_id", 0) % len(SNAKE_COLORS)
+        colors = SNAKE_COLORS[cid]
+        food = s.get("food", [0, 0])
+        x2 = s.get("x2")
+        if food:
+            fx, fy = food[0] % grid_w, food[1] % grid_h
+            rect = (margin_x + fx * cell_size + 2, grid_y + fy * cell_size + 2,
+                    cell_size - 4, cell_size - 4)
+            pygame.draw.rect(screen, colors["food"], rect, border_radius=4)
+        if x2:
+            xx, xy = x2[0] % grid_w, x2[1] % grid_h
+            rect = (margin_x + xx * cell_size + 2, grid_y + xy * cell_size + 2,
+                    cell_size - 4, cell_size - 4)
+            pygame.draw.rect(screen, colors["x2"], rect, border_radius=4)
+            txt = small_font.render("x2", True, (40, 40, 40))
+            tw, th = txt.get_size()
+            screen.blit(txt, (margin_x + xx * cell_size + (cell_size - tw) // 2,
+                             grid_y + xy * cell_size + (cell_size - th) // 2))
 
-    # x2
-    if x2:
-        xx, xy = x2[0] % grid_w, x2[1] % grid_h
-        rect = (margin_x + xx * cell_size + 2, grid_y + xy * cell_size + 2,
-                cell_size - 4, cell_size - 4)
-        pygame.draw.rect(screen, X2, rect, border_radius=4)
-        txt = small_font.render("x2", True, (40, 40, 40))
-        tw, th = txt.get_size()
-        screen.blit(txt, (margin_x + xx * cell_size + (cell_size - tw) // 2,
-                         grid_y + xy * cell_size + (cell_size - th) // 2))
-
-    # 蛇身
-    for i, (sx, sy) in enumerate(snake):
-        sx, sy = sx % grid_w, sy % grid_h
-        rect = (margin_x + sx * cell_size + 1, grid_y + sy * cell_size + 1,
-                cell_size - 2, cell_size - 2)
-        color = SNAKE_HEAD if i == 0 else SNAKE_BODY
-        pygame.draw.rect(screen, color, rect, border_radius=3)
+    # 蛇身（每蛇用自身颜色系）
+    for s in snakes_data:
+        body = s.get("body", [])
+        cid = s.get("color_id", 0) % len(SNAKE_COLORS)
+        body_color = SNAKE_COLORS[cid]["body"]
+        for i, (sx, sy) in enumerate(body):
+            sx, sy = sx % grid_w, sy % grid_h
+            rect = (margin_x + sx * cell_size + 1, grid_y + sy * cell_size + 1,
+                    cell_size - 2, cell_size - 2)
+            pygame.draw.rect(screen, body_color, rect, border_radius=3)
 
     # 无数据时显示提示（网格中央）
     if total_episodes == 0:
@@ -180,16 +321,28 @@ def draw_scene(
         y += line_h - 4
     y += line_h
 
-    # 3. 标注（正确/错误 + 原因）
-    if total_episodes > 0 and label not in ("-", ""):
-        label_zh = "正确 (对)" if label == "correct" else "错误 (错)"
-        label_color = CORRECT if label == "correct" else INCORRECT
-        label_txt = font.render(label_zh, True, label_color)
-        screen.blit(label_txt, (panel_x, y))
-        y += line_h
-        reason_txt = small_font.render(reason_zh, True, TEXT)
-        screen.blit(reason_txt, (panel_x, y))
-        y += line_h
+    # 3. 标注（每蛇单独 / 或单蛇汇总）
+    if total_episodes > 0 and (label not in ("-", "") or snake_annotations):
+        if snake_annotations:
+            for i, ann in enumerate(snake_annotations):
+                l, r = ann.get("label", "correct"), ann.get("reason", "")
+                lbl_zh = "正确" if l == "correct" else "错误"
+                rsn_zh = REASON_NAMES.get(r, r)
+                snake_color = SNAKE_COLORS[i % len(SNAKE_COLORS)]["body"]
+                line_color = snake_color if l == "correct" else INCORRECT
+                txt = small_font.render(f"蛇{i+1}: {lbl_zh} - {rsn_zh}", True, line_color)
+                screen.blit(txt, (panel_x, y))
+                y += line_h - 2
+            y += 4
+        else:
+            label_zh = "正确 (对)" if label == "correct" else "错误 (错)"
+            label_color = CORRECT if label == "correct" else INCORRECT
+            label_txt = font.render(label_zh, True, label_color)
+            screen.blit(label_txt, (panel_x, y))
+            y += line_h
+            reason_txt = small_font.render(reason_zh, True, TEXT)
+            screen.blit(reason_txt, (panel_x, y))
+            y += line_h
     else:
         y += line_h * 2
 
@@ -202,21 +355,15 @@ def draw_scene(
     y += line_h
 
     # 5. 步数 / 得分
-    info_txt = font.render(f"步数: {step}  得分: {score}", True, TEXT)
+    info_txt = font.render(f"步数: {step}  得分: {total_score}", True, TEXT)
     screen.blit(info_txt, (panel_x, y))
-    y += line_h
-
-    # 6. 行为标注
-    anno_color = CORRECT if label == "correct" else (INCORRECT if label == "incorrect" else TEXT)
-    anno_txt = small_font.render(f"行为标注: {reason_zh}", True, anno_color)
-    screen.blit(anno_txt, (panel_x, y))
     y += line_h + 8
 
-    # 7. 控制说明
+    # 6. 控制说明
     ctrl_txt = small_font.render("空格:播放/暂停", True, TEXT_DIM)
     screen.blit(ctrl_txt, (panel_x, y))
     y += line_h - 4
-    ctrl_txt = small_font.render("←→:帧  A/D:局", True, TEXT_DIM)
+    ctrl_txt = small_font.render("←→:帧  A/D或PgUp/Dn:局", True, TEXT_DIM)
     screen.blit(ctrl_txt, (panel_x, y))
     y += line_h - 4
     ctrl_txt = small_font.render("Home/End:首尾", True, TEXT_DIM)
@@ -274,6 +421,11 @@ def main():
             return True
         return False
 
+    # 禁用 IME 文本输入，避免 A/D 等字母键被输入法拦截导致失效
+    pygame.key.stop_text_input()
+    # 关闭按键连发，避免长按导致多次触发
+    pygame.key.set_repeat()
+
     while True:
         mouse_pos = pygame.mouse.get_pos()
         btn_hover = open_btn_rect.collidepoint(mouse_pos)
@@ -288,34 +440,38 @@ def main():
                     if new_path:
                         try_load(new_path)
             elif e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_o:
+                k, sc = e.key, getattr(e, "scancode", 0)
+                # 用 key 或 scancode 判断，避免 IME 下 key 异常（A=30,D=32,Left=75,Right=77,O=24）
+                def hit(key_val, scan):
+                    return k == key_val or sc == scan
+                if hit(pygame.K_o, 24):
                     if filedialog:
                         new_path = choose_json_file(last_file_dir)
                         if new_path:
                             try_load(new_path)
                 elif not episodes:
                     continue
-                elif e.key == pygame.K_SPACE:
+                elif hit(pygame.K_SPACE, 57):
                     playing = not playing
-                elif e.key == pygame.K_LEFT:
+                elif hit(pygame.K_LEFT, 75):
                     playing = False
                     scene_idx = max(0, scene_idx - 1)
-                elif e.key == pygame.K_RIGHT:
+                elif hit(pygame.K_RIGHT, 77):
                     playing = False
                     ep = episodes[episode_idx]
                     scenes = ep.get("scenes", [])
                     scene_idx = min(len(scenes) - 1, scene_idx + 1)
-                elif e.key == pygame.K_a:
+                elif hit(pygame.K_a, 30) or hit(pygame.K_PAGEUP, 73):
                     episode_idx = (episode_idx - 1) % len(episodes)
                     scene_idx = 0
                     playing = False
-                elif e.key == pygame.K_d:
+                elif hit(pygame.K_d, 32) or hit(pygame.K_PAGEDOWN, 81):
                     episode_idx = (episode_idx + 1) % len(episodes)
                     scene_idx = 0
                     playing = False
-                elif e.key == pygame.K_HOME:
+                elif hit(pygame.K_HOME, 71):
                     scene_idx = 0
-                elif e.key == pygame.K_END:
+                elif hit(pygame.K_END, 79):
                     ep = episodes[episode_idx]
                     scenes = ep.get("scenes", [])
                     scene_idx = len(scenes) - 1
@@ -345,14 +501,33 @@ def main():
                             playing = False
             path_str = str(current_path) if current_path else None
 
+        # 优先使用预计算的每帧标注（生成时已写入 scene）；无则回退到推断
+        if episodes and ep.get("scenes"):
+            if "snake_annotations" in scene:
+                snake_ann = scene["snake_annotations"]
+                disp_label = snake_ann[0]["label"] if snake_ann else "correct"
+                disp_reason = snake_ann[0]["reason"] if snake_ann else "in_progress"
+            else:
+                disp_label, disp_reason = infer_annotation_so_far(
+                    ep["scenes"], scene_idx,
+                    ep.get("label", "correct"), ep.get("reason", "ate_food_no_x2"),
+                )
+                snake_ann = infer_snake_annotations_so_far(
+                    ep["scenes"], scene_idx,
+                    ep.get("snake_annotations") or [{"label": disp_label, "reason": disp_reason}],
+                )
+        else:
+            disp_label, disp_reason = ep.get("label", "-"), ep.get("reason", "-")
+            snake_ann = None
         draw_scene(
             screen, scene, cell_size, margin_x, margin_y,
             grid_w, grid_h, panel_x, panel_w,
             font, small_font,
-            ep.get("label", "-"), ep.get("reason", "-"),
+            disp_label, disp_reason,
             episode_idx, len(episodes) or 1,
             scene_idx, len(ep.get("scenes", [])) or 1,
             path_str, open_btn_rect, btn_hover,
+            snake_annotations=snake_ann,
         )
 
         pygame.display.flip()

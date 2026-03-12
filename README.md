@@ -59,6 +59,7 @@ python data_generator.py --batches 100 --batch-size 100 --output my_data --mista
 | `-s, --batch-size` | 100 | 每 batch 局数 |
 | `-o, --output` | batches | 输出目录 |
 | `-m, --mistake-rate` | 0.15 | AI 犯错概率（先吃食物浪费 x2） |
+| `-f, --max-foods` | 12 | 每局需吃完的食物波数 |
 
 每个 batch 保存为独立 JSON，如 `batches/batch_00000.json`。每局存储完整场景序列。
 
@@ -85,6 +86,6 @@ from data_generator import generate_dataset, run_episode
 generate_dataset(num_batches=100, batch_size=100, output_dir="batches")
 
 # 单局运行（含 AI 犯错概率）
-ep = run_episode(seed=42, max_foods=5, ai_mistake_rate=0.15)
+ep = run_episode(seed=42, max_foods=12, ai_mistake_rate=0.15)
 print(ep["label"], ep["reason"], len(ep["scenes"]))
 ```

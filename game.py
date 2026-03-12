@@ -1,15 +1,14 @@
 """
-贪吃蛇游戏核心逻辑
-- 无墙壁，蛇撞自己即结束
-- 吃1个食物+1格长度
+贪吃蛇游戏核心逻辑（支持多蛇）
+- 蛇撞自己或撞其他蛇即结束，标注错误
+- 每蛇独立 food/x2，颜色与蛇身同色系、深浅区分
 - 50%概率生成x2，先吃x2再吃食物可得2分，否则1分
-- x2每波食物只生效一次，生成新食物时x2失效
 """
 
 import random
 from typing import Optional
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class Direction(Enum):
@@ -19,61 +18,113 @@ class Direction(Enum):
     RIGHT = (1, 0)
 
 
+# 每蛇颜色系：蛇身 / 食物(浅) / x2(深)
+SNAKE_COLORS = [
+    {"body": (76, 175, 80), "food": (129, 199, 132), "x2": (46, 125, 50)},    # 绿
+    {"body": (33, 150, 243), "food": (100, 181, 246), "x2": (13, 71, 161)},   # 蓝
+    {"body": (255, 152, 0), "food": (255, 183, 77), "x2": (230, 81, 0)},      # 橙
+]
+
+
 @dataclass
-class GameState:
-    """游戏状态快照，用于场景记录"""
-    snake: list[list[int]]  # [[x,y], ...] 蛇身坐标
-    food: list[int]         # [x, y]
-    x2: Optional[list[int]] # [x, y] 或 None
+class SnakeState:
+    body: list[list[int]]
+    food: list[int]
+    x2: Optional[list[int]]
     score: int
-    x2_active: bool         # 蛇是否已吃x2（本波有效）
-    step: int
+    x2_active: bool
+    color_id: int
 
     def to_dict(self) -> dict:
         return {
-            "snake": self.snake.copy(),
+            "body": [p.copy() for p in self.body],
             "food": self.food.copy(),
             "x2": self.x2.copy() if self.x2 else None,
             "score": self.score,
             "x2_active": self.x2_active,
+            "color_id": self.color_id,
+        }
+
+
+@dataclass
+class GameState:
+    """游戏状态快照"""
+    snakes: list[SnakeState]
+    step: int
+
+    def to_dict(self) -> dict:
+        return {
+            "snakes": [s.to_dict() for s in self.snakes],
             "step": self.step,
         }
 
 
 class SnakeGame:
-    def __init__(self, width: int = 15, height: int = 15, seed: Optional[int] = None):
+    def __init__(
+        self,
+        width: int = 15,
+        height: int = 15,
+        num_snakes: int = 1,
+        seed: Optional[int] = None,
+    ):
         self.width = width
         self.height = height
+        self.num_snakes = num_snakes
         self.rng = random.Random(seed)
 
-        # 蛇：头部在前
-        cx, cy = width // 2, height // 2
-        self.snake: list[list[int]] = [[cx, cy]]
-        self.direction = Direction.RIGHT
+        # 每条蛇: body, food, x2, score, x2_active
+        self.snakes: list[dict] = []
+        occupied = set()
 
-        self.food: list[int] = [0, 0]
-        self.x2: Optional[list[int]] = None
-        self.score = 0
-        self.x2_active = False  # 本波是否已吃x2
+        positions = [
+            (width // 2, height // 2),
+            (width // 4, height // 2),
+            (3 * width // 4, height // 2),
+        ]
+        for i in range(num_snakes):
+            pos = positions[i] if i < len(positions) else self._random_empty_pos(occupied)
+            body = [[pos[0], pos[1]]]
+            occupied.add((pos[0], pos[1]))
+            self.snakes.append({
+                "body": body,
+                "food": [0, 0],
+                "x2": None,
+                "score": 0,
+                "x2_active": False,
+                "color_id": i % len(SNAKE_COLORS),
+            })
+
         self.step_count = 0
+        for i in range(num_snakes):
+            self._spawn_food_for(i)
 
-        self._spawn_food()
+    def _all_occupied(self) -> set[tuple[int, int]]:
+        out = set()
+        for s in self.snakes:
+            out.update(tuple(p) for p in s["body"])
+            out.add(tuple(s["food"]))
+            if s["x2"]:
+                out.add(tuple(s["x2"]))
+        return out
 
-    def _spawn_food(self) -> None:
-        """生成新食物，50%概率同时生成x2"""
-        occupied = set(tuple(p) for p in self.snake)
-        self.food = self._random_empty_pos(occupied)
-        occupied.add(tuple(self.food))
+    def _spawn_food_for(self, snake_idx: int) -> None:
+        s = self.snakes[snake_idx]
+        occupied = self._all_occupied()
+        occupied.discard(tuple(s["food"]))
+        occupied.discard(tuple(s["x2"]) if s["x2"] else (-1, -1))
 
-        # x2 每波重置：生成新食物时上一波x2失效
-        self.x2 = None
+        s["food"] = self._random_empty_pos(occupied)
+        occupied.add(tuple(s["food"]))
+        s["x2"] = None
         if self.rng.random() < 0.5:
             pos = self._random_empty_pos(occupied)
-            if pos is not None:
-                self.x2 = pos
+            if pos:
+                s["x2"] = pos
+
+    def respawn_food_for(self, snake_idx: int) -> None:
+        self._spawn_food_for(snake_idx)
 
     def _random_empty_pos(self, occupied: set) -> list[int]:
-        """在空位中随机选一个"""
         candidates = [
             [x, y] for x in range(self.width) for y in range(self.height)
             if (x, y) not in occupied
@@ -84,50 +135,81 @@ class SnakeGame:
 
     def get_state(self) -> GameState:
         return GameState(
-            snake=[p.copy() for p in self.snake],
-            food=self.food.copy(),
-            x2=self.x2.copy() if self.x2 else None,
-            score=self.score,
-            x2_active=self.x2_active,
+            snakes=[
+                SnakeState(
+                    body=[p.copy() for p in s["body"]],
+                    food=s["food"].copy(),
+                    x2=s["x2"].copy() if s["x2"] else None,
+                    score=s["score"],
+                    x2_active=s["x2_active"],
+                    color_id=s["color_id"],
+                )
+                for s in self.snakes
+            ],
             step=self.step_count,
         )
 
-    def move(self, direction: Direction) -> tuple[bool, str]:
+    def move_all(self, directions: list[Direction]) -> tuple[bool, str, Optional[int] | tuple[int, ...]]:
         """
-        执行一步移动
-        返回: (是否继续游戏, 本步事件描述)
-        事件: 'continue' | 'ate_food' | 'ate_food_x2' | 'ate_x2' | 'collision'
+        所有蛇同时移动一步
+        返回: (是否继续, 事件, 触发的蛇索引或None，蛇间碰撞时为 (i,j) 双方索引)
+        事件: 'continue' | 'ate_food' | 'ate_food_x2' | 'ate_x2' | 'self_collision' | 'snake_collision'
         """
-        dx, dy = direction.value
-        head = self.snake[0]
-        new_head = [head[0] + dx, head[1] + dy]
+        if len(directions) != self.num_snakes:
+            return False, "self_collision", 0
 
-        # 无墙壁：环形穿越
-        new_head[0] = new_head[0] % self.width
-        new_head[1] = new_head[1] % self.height
+        new_heads = []
+        new_bodies = []
+        for i, d in enumerate(directions):
+            head = self.snakes[i]["body"][0]
+            dx, dy = d.value
+            nh = [(head[0] + dx) % self.width, (head[1] + dy) % self.height]
+            new_heads.append(nh)
+            new_bodies.append([nh] + self.snakes[i]["body"][:-1])
 
-        # 撞自己
-        body_set = set(tuple(p) for p in self.snake)
-        if tuple(new_head) in body_set:
-            return False, "collision"
+        # 检查蛇间碰撞、撞自己
+        for i in range(self.num_snakes):
+            nh = tuple(new_heads[i])
+            for j in range(self.num_snakes):
+                if i == j:
+                    if nh in set(tuple(p) for p in new_bodies[i][1:]):
+                        return False, "self_collision", i
+                else:
+                    if nh in set(tuple(p) for p in new_bodies[j]):
+                        return False, "snake_collision", (i, j)  # 双方都错
+            for j in range(i + 1, self.num_snakes):
+                if new_heads[i] == new_heads[j]:
+                    return False, "snake_collision", (i, j)  # 头对头，双方都错
 
         self.step_count += 1
-        self.snake.insert(0, new_head)
+        eating_snake: Optional[int] = None
+        event = "continue"
 
-        # 吃食物（苹果）
-        if new_head == self.food:
-            used_x2 = self.x2_active
-            self.score += 2 if used_x2 else 1
-            self.x2_active = False
-            self._spawn_food()
-            return True, "ate_food_x2" if used_x2 else "ate_food"
+        for i in range(self.num_snakes):
+            s = self.snakes[i]
+            nh = new_heads[i]
 
-        # 吃x2（不增长，只激活加成）
-        if self.x2 and new_head == self.x2:
-            self.x2_active = True
-            self.x2 = None
-            self.snake.pop()
-            return True, "ate_x2"
+            if nh == s["food"]:
+                used = s["x2_active"]
+                s["score"] += 2 if used else 1
+                s["x2_active"] = False
+                self._spawn_food_for(i)
+                eating_snake = i
+                event = "ate_food_x2" if used else "ate_food"
+                break
+            if s["x2"] and nh == s["x2"]:
+                s["x2_active"] = True
+                s["x2"] = None
+                eating_snake = i
+                event = "ate_x2"
+                break
 
-        self.snake.pop()
-        return True, "continue"
+        for i in range(self.num_snakes):
+            body = self.snakes[i]["body"]
+            nh = new_heads[i]
+            if eating_snake is not None and i == eating_snake and event in ("ate_food", "ate_food_x2"):
+                self.snakes[i]["body"] = [nh] + body
+            else:
+                self.snakes[i]["body"] = [nh] + body[:-1]
+
+        return True, event if eating_snake is not None else "continue", eating_snake
