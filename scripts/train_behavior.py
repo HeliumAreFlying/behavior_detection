@@ -62,6 +62,8 @@ def load_track_sequences(
             has_x2 = f.get("has_x2", 0.0)
             ate_food = f.get("ate_food", 0.0)
             ate_x2 = f.get("ate_x2", 0.0)
+            is_dead = f.get("is_dead", 0.0)
+            steps_since_food = f.get("steps_since_food", 0.0)
             if add_velocity and i > 0:
                 dx = xc - feats[i - 1]["xc"]
                 dy = yc - feats[i - 1]["yc"]
@@ -75,8 +77,8 @@ def load_track_sequences(
             vel_norm = (dx * dx + dy * dy) ** 0.5 or 1e-6
             to_food = (fx - xc) * dx + (fy - yc) * dy
             move_to_food = max(-1, min(1, to_food / vel_norm)) if (fx or fy) else 0.0
-            # 14 dims: head, vel, food, x2, has_x2, dist_food, dist_x2, move_to_food, ate_food, ate_x2
-            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2])
+            # 16 dims: head, vel, food, x2, has_x2, dist_food, dist_x2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food
+            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food])
         if not add_velocity:
             seq = []
             for f in feats:
@@ -85,9 +87,11 @@ def load_track_sequences(
                 xx, xy = f.get("xx",0), f.get("xy",0)
                 hx2 = f.get("has_x2",0)
                 ate_food, ate_x2 = f.get("ate_food",0), f.get("ate_x2",0)
+                is_dead = f.get("is_dead", 0.0)
+                steps_since_food = f.get("steps_since_food", 0.0)
                 df = min(((fx-xc)**2+(fy-yc)**2)**0.5, 1.5) if (fx or fy) else 0.0
                 dx2 = min(((xx-xc)**2+(xy-yc)**2)**0.5, 1.5) if hx2 and (xx or xy) else 0.0
-                seq.append([xc, yc, 0, 0, fx, fy, xx, xy, hx2, df, dx2, 0.0, ate_food, ate_x2])
+                seq.append([xc, yc, 0, 0, fx, fy, xx, xy, hx2, df, dx2, 0.0, ate_food, ate_x2, is_dead, steps_since_food])
 
         label = rec.get("label", "correct")
         label_idx = 1 if label == "incorrect" else 0
@@ -105,7 +109,7 @@ def load_grid_sequences(
     """
     从 batch JSON 加载网格序列，特征必须与 YOLO/label 路径一致（仅用 YOLO 可检测的 head/food/x2）。
     不使用 x2_active、score 等游戏内部状态。
-    输出 14 维与 track 一致: [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2]
+    输出 16 维与 track 一致: [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food]
     """
     from models.behavior_correctness import REASON_TO_IDX
 
@@ -142,7 +146,14 @@ def load_grid_sequences(
                                        1.0 if x2 else 0.0))
                 if len(raw_frames) < 2:
                     continue
+                anns = scenes[-1].get("snake_annotations", [])
+                is_dead_last = 0.0
+                if si < len(anns):
+                    r = anns[si].get("reason", "in_progress")
+                    if r in ("self_collision", "snake_collision"):
+                        is_dead_last = 1.0
                 seq = []
+                steps_counter = 0
                 for i, (xc, yc, fx, fy, xx, xy, has_x2) in enumerate(raw_frames):
                     p = raw_frames[i - 1] if i > 0 else None
                     ate_food, ate_x2 = 0.0, 0.0
@@ -151,8 +162,13 @@ def load_grid_sequences(
                         def _d(ax, ay, bx, by): return (ax - bx) ** 2 + (ay - by) ** 2
                         if (p[2] or p[3]) and _d(fx, fy, p[2], p[3]) > thresh and _d(xc, yc, p[2], p[3]) < thresh:
                             ate_food = 1.0
+                            steps_counter = 0
                         if p[6] and (not has_x2 or _d(xx, xy, p[4], p[5]) > thresh) and (p[4] or p[5]) and _d(xc, yc, p[4], p[5]) < thresh:
                             ate_x2 = 1.0
+                    if ate_food == 0:
+                        steps_counter += 1
+                    steps_since_food = min(steps_counter / 80.0, 1.0)
+                    is_dead = is_dead_last if i == len(raw_frames) - 1 else 0.0
                     if add_velocity and i > 0 and p is not None:
                         dx, dy = xc - p[0], yc - p[1]
                         df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
@@ -165,7 +181,7 @@ def load_grid_sequences(
                         df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
                         dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
                         move_to_food = 0.0
-                    seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2])
+                    seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food])
                 if len(seq) < 2:
                     continue
                 anns = scenes[-1].get("snake_annotations", [])
@@ -206,7 +222,7 @@ def main():
     p.add_argument("--no-attention", action="store_true", help="禁用自注意力")
     p.add_argument("--label-smoothing", type=float, default=0.1, help="CE label smoothing")
     p.add_argument("--input-dim", type=int, default=0,
-                   help="0=自动: 14*frame_context，默认 14*3=42")
+                   help="0=自动: 16*frame_context，默认 16*3=48")
     p.add_argument("--frame-context", type=int, default=3,
                    help="前后帧合并数：1 前 + 当前 + 1 后 = 3。1 表示不合并")
     p.add_argument("--val-ratio", type=float, default=0.2)
@@ -256,7 +272,7 @@ def main():
         if not batches_dir.is_absolute():
             batches_dir = ROOT / batches_dir
         samples, episode_keys = load_grid_sequences(batches_dir, add_velocity=not args.no_velocity)
-        base_dim = 14
+        base_dim = 16
         input_dim = args.input_dim or (base_dim * frame_ctx if frame_ctx > 1 else base_dim)
         print(f"从 grid 加载: {len(samples)} 条序列 (与 YOLO 路径同特征), base_dim={base_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
     else:
@@ -268,7 +284,7 @@ def main():
             print("请先运行: python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences")
             sys.exit(1)
         samples, episode_keys = load_track_sequences(data_path, add_velocity=not args.no_velocity)
-        base_dim = len(samples[0][0][0]) if samples else 14
+        base_dim = len(samples[0][0][0]) if samples else 16
         input_dim = args.input_dim or (base_dim * frame_ctx if frame_ctx > 1 else base_dim)
         print(f"从 track_sequences 加载: {len(samples)} 条序列, base_dim={base_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
 
@@ -332,7 +348,7 @@ def main():
         return out
 
     class SeqDataset(Dataset):
-        def __init__(self, data, augment=False, frame_context_half=0, base_dim=14):
+        def __init__(self, data, augment=False, frame_context_half=0, base_dim=16):
             self.data = data
             self.augment = augment
             self.frame_half = frame_context_half
@@ -421,6 +437,12 @@ def main():
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=25)
 
+    try:
+        from sklearn.metrics import f1_score
+    except ImportError:
+        print("请安装 sklearn: pip install scikit-learn")
+        sys.exit(1)
+
     def _focal_loss(logits, targets, gamma, weight=None):
         ce = nn.functional.cross_entropy(logits, targets, reduction="none")
         pt = torch.exp(-ce)
@@ -442,7 +464,7 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    best_val_acc = 0.0
+    best_val_f1 = 0.0
     best_epoch = 0
     for ep in range(args.epochs):
         model.train()
@@ -475,8 +497,7 @@ def main():
                 train_loss += loss.item()
 
         model.eval()
-        val_correct = 0
-        val_total = 0
+        val_preds, val_labels = [], []
         with torch.no_grad():
             for x, lengths, y_label, y_reason, y_ep in val_loader:
                 x, lengths = x.to(device), lengths.to(device)
@@ -484,14 +505,15 @@ def main():
                 logits_c, _ = model(x, lengths)
                 mask = (y_ep > 0.5).squeeze(1)
                 if mask.any():
-                    pred = logits_c[mask].argmax(1)
-                    val_correct += (pred == y_label[mask]).sum().item()
-                    val_total += mask.sum().item()
+                    pred = logits_c[mask].argmax(1).cpu().numpy()
+                    gt = y_label[mask].cpu().numpy()
+                    val_preds.extend(pred.tolist())
+                    val_labels.extend(gt.tolist())
 
-        val_acc = val_correct / val_total if val_total else 0
-        scheduler.step(val_acc)
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        val_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
+        scheduler.step(val_f1)
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
             best_epoch = ep + 1
             torch.save({
                 "epoch": ep,
@@ -513,9 +535,9 @@ def main():
         }, out_dir / "last.pt")
         if (ep + 1) % 10 == 0 or ep == 0:
             print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} "
-                  f"train_acc={train_correct/train_total:.4f} val_acc={val_acc:.4f}")
+                  f"train_acc={train_correct/train_total:.4f} val_f1={val_f1:.4f}")
 
-    print(f"训练完成，最佳 val_acc={best_val_acc:.4f} (epoch {best_epoch})")
+    print(f"训练完成，最佳 val_f1={best_val_f1:.4f} (epoch {best_epoch})")
     print(f"模型保存: {out_dir / 'best.pt'}, {out_dir / 'last.pt'}")
 
 

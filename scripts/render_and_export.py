@@ -34,8 +34,9 @@ CELL_SIZE = IMG_W / GRID_W  # 640/15 ≈ 42.67
 BG = (28, 28, 32)
 GRID_LINE = (48, 48, 56)
 
-# YOLO 类别: 不区分颜色，由跟踪 (ByteTrack) 区分不同目标
-CLASS_NAMES = ["snake_head", "snake_body", "food", "x2"]
+# YOLO 类别: snake_head_dead(4)=撞击死亡的蛇头(圆形)，用于特征 is_dead
+CLASS_NAMES = ["snake_head", "snake_body", "food", "x2", "snake_head_dead"]
+CLASS_HEAD, CLASS_HEAD_DEAD = 0, 4
 
 
 def grid_to_yolo(gx: int, gy: int) -> tuple[float, float, float, float]:
@@ -48,14 +49,17 @@ def grid_to_yolo(gx: int, gy: int) -> tuple[float, float, float, float]:
     return xc, yc, w, h
 
 
-def scene_to_bboxes(scene: dict) -> list[tuple[int, float, float, float, float]]:
-    """从 scene 提取 YOLO 标注 (class_id, xc, yc, w, h)"""
+def scene_to_bboxes(scene: dict, scene_idx: int = 0, total_scenes: int = 1) -> list[tuple[int, float, float, float, float]]:
+    """从 scene 提取 YOLO 标注 (class_id, xc, yc, w, h)。撞击死亡的蛇头用 class 4。"""
     lines: list[tuple[int, float, float, float, float]] = []
     snakes_data = scene.get("snakes")
     if not snakes_data:
         return lines
+    anns = scene.get("snake_annotations", [])
+    is_last = (scene_idx == total_scenes - 1) if total_scenes else False
+    dead_reasons = {"self_collision", "snake_collision"}
 
-    for s in snakes_data:
+    for si, s in enumerate(snakes_data):
         body = s.get("body", [])
         food = s.get("food", [0, 0])
         x2 = s.get("x2")
@@ -68,7 +72,11 @@ def scene_to_bboxes(scene: dict) -> list[tuple[int, float, float, float, float]]
             gx = ((gx % GRID_W) + GRID_W) % GRID_W
             gy = ((gy % GRID_H) + GRID_H) % GRID_H
             xc, yc, w, h = grid_to_yolo(gx, gy)
-            cls = 0 if i == 0 else 1  # snake_head / snake_body
+            if i == 0:
+                ann = anns[si] if si < len(anns) else {}
+                cls = CLASS_HEAD_DEAD if (is_last and ann.get("reason") in dead_reasons) else CLASS_HEAD
+            else:
+                cls = 1  # snake_body
             lines.append((cls, xc, yc, w, h))
 
         if food:
@@ -238,7 +246,7 @@ def _process_one_item(item: tuple) -> dict:
     surf = render_scene(scene, scene_idx=sc_idx, prev_scene=prev_scene, total_scenes=total_scenes)
     pygame.image.save(surf, img_path)
 
-    bboxes = scene_to_bboxes(scene)
+    bboxes = scene_to_bboxes(scene, scene_idx=sc_idx, total_scenes=total_scenes)
     lbl_lines = [f"{c} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}" for c, xc, yc, w, h in bboxes]
     Path(lbl_path).write_text("\n".join(lbl_lines), encoding="utf-8")
 

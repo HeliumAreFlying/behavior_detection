@@ -16,18 +16,18 @@ from collections import defaultdict
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-CLASS_HEAD, CLASS_FOOD, CLASS_X2 = 0, 2, 3
+CLASS_HEAD, CLASS_FOOD, CLASS_X2, CLASS_HEAD_DEAD = 0, 2, 3, 4
 
 
-def _parse_label_per_snake(lbl_path: Path) -> list[tuple[float, float, float, float, float, float, float]]:
+def _parse_label_per_snake(lbl_path: Path) -> list[tuple[float, float, float, float, float, float, float, float]]:
     """
-    从 label 解析每蛇的 (head_x, head_y, food_x, food_y, x2_x, x2_y, has_x2)。
-    顺序: snake_head(0), snake_body(1)..., food(2), x2(3)
+    从 label 解析每蛇的 (head_x, head_y, food_x, food_y, x2_x, x2_y, has_x2, is_dead)。
+    snake_head(0) / snake_head_dead(4) 区分活/死
     """
     if not lbl_path.exists():
         return []
     lines = lbl_path.read_text(encoding="utf-8").strip().splitlines()
-    snakes: list[tuple[float, float, float, float, float, float, float]] = []
+    snakes: list[tuple[float, float, float, float, float, float, float, float]] = []
     i = 0
     while i < len(lines):
         parts = lines[i].split()
@@ -36,7 +36,8 @@ def _parse_label_per_snake(lbl_path: Path) -> list[tuple[float, float, float, fl
             continue
         cls_id = int(parts[0])
         xc, yc = float(parts[1]), float(parts[2])
-        if cls_id == CLASS_HEAD:
+        if cls_id in (CLASS_HEAD, CLASS_HEAD_DEAD):
+            is_dead = 1.0 if cls_id == CLASS_HEAD_DEAD else 0.0
             food_x, food_y = 0.0, 0.0
             x2_x, x2_y = 0.0, 0.0
             has_x2 = 0.0
@@ -47,7 +48,7 @@ def _parse_label_per_snake(lbl_path: Path) -> list[tuple[float, float, float, fl
                     i += 1
                     continue
                 c = int(p[0])
-                if c == CLASS_HEAD:
+                if c in (CLASS_HEAD, CLASS_HEAD_DEAD):
                     break
                 if c == CLASS_FOOD:
                     food_x, food_y = float(p[1]), float(p[2])
@@ -55,20 +56,20 @@ def _parse_label_per_snake(lbl_path: Path) -> list[tuple[float, float, float, fl
                     x2_x, x2_y = float(p[1]), float(p[2])
                     has_x2 = 1.0
                 i += 1
-            snakes.append((xc, yc, food_x, food_y, x2_x, x2_y, has_x2))
+            snakes.append((xc, yc, food_x, food_y, x2_x, x2_y, has_x2, is_dead))
         else:
             i += 1
     return snakes
 
 
 def _gt_heads_from_labels(lbl_path: Path) -> list[tuple[float, float]]:
-    """从 YOLO label 文件读取蛇头位置 (class=0)，返回 [(xc, yc), ...] 归一化坐标，按蛇顺序"""
+    """从 YOLO label 文件读取蛇头位置 (class=0 或 4)，返回 [(xc, yc), ...] 归一化坐标，按蛇顺序"""
     if not lbl_path.exists():
         return []
     gt: list[tuple[float, float]] = []
     for line in lbl_path.read_text(encoding="utf-8").strip().splitlines():
         parts = line.split()
-        if len(parts) >= 5 and int(parts[0]) == CLASS_HEAD:
+        if len(parts) >= 5 and int(parts[0]) in (CLASS_HEAD, CLASS_HEAD_DEAD):
             gt.append((float(parts[1]), float(parts[2])))
     return gt
 
@@ -108,8 +109,8 @@ def extract_head_features_per_frame(
     track_to_snake: dict[int, int],
 ) -> dict[int, list[dict]]:
     """
-    从每帧跟踪结果中提取每条蛇的 head 中心 (xc, yc)。
-    返回: snake_idx -> [{"xc": f, "yc": f, "t": int}, ...]
+    从每帧跟踪结果中提取每条蛇的 head (xc, yc, is_dead)。
+    YOLO 需 5 类时 class 4=snake_head_dead 表示撞击死亡。
     """
     snake_seqs: dict[int, list[dict]] = defaultdict(list)
     for t, res in enumerate(results_list):
@@ -119,26 +120,27 @@ def extract_head_features_per_frame(
         for i in range(len(boxes)):
             tid = int(boxes.id[i]) if boxes.id is not None else None
             cls_id = int(boxes.cls[i])
-            if cls_id != CLASS_HEAD or tid is None:
+            if cls_id not in (CLASS_HEAD, CLASS_HEAD_DEAD) or tid is None:
                 continue
             if tid not in track_to_snake:
                 continue
             snake_idx = track_to_snake[tid]
             xc = float(boxes.xywhn[i][0])
             yc = float(boxes.xywhn[i][1])
-            snake_seqs[snake_idx].append({"xc": xc, "yc": yc, "t": t})
+            is_dead = 1.0 if cls_id == CLASS_HEAD_DEAD else 0.0
+            snake_seqs[snake_idx].append({"xc": xc, "yc": yc, "is_dead": is_dead, "t": t})
     return dict(snake_seqs)
 
 
 def _infer_ate_events(
-    prev: tuple[float, float, float, float, float, float, float] | None,
-    curr: tuple[float, float, float, float, float, float, float],
+    prev: tuple | None,
+    curr: tuple,
 ) -> tuple[float, float]:
     """根据前后帧推断本帧是否刚吃到食物/x2。返回 (ate_food, ate_x2)。"""
     if prev is None:
         return 0.0, 0.0
-    hx, hy, fx, fy, xx, xy, has_x2 = curr
-    px, py, pfx, pfy, pxx, pxy, phx2 = prev
+    hx, hy, fx, fy, xx, xy, has_x2 = curr[:7]
+    px, py, pfx, pfy, pxx, pxy, phx2 = prev[:7]
     thresh = 0.02  # 归一化坐标下距离阈值
     def _dist(ax, ay, bx, by) -> float:
         return (ax - bx) ** 2 + (ay - by) ** 2
@@ -157,22 +159,33 @@ def extract_sequences_from_labels(
     entries: list[dict], dataset_dir: Path
 ) -> dict[int, list[dict]]:
     """
-    从 label 文件读取每蛇每帧特征: head, food, x2, ate_food, ate_x2。
-    返回: snake_idx -> [{"xc", "yc", "fx", "fy", "xx", "xy", "has_x2", "ate_food", "ate_x2", "t"}, ...]
+    从 label 文件读取每蛇每帧特征: head, food, x2, ate_food, ate_x2, is_dead, steps_since_food。
+    返回: snake_idx -> [{"xc", "yc", "fx", "fy", "xx", "xy", "has_x2", "ate_food", "ate_x2", "is_dead", "steps_since_food", "t"}, ...]
     """
     snake_seqs: dict[int, list[dict]] = defaultdict(list)
-    prev_rows: list[tuple[float, ...]] | None = None
+    prev_rows: list[tuple] | None = None
+    steps_counters: list[int] = []
     for t, e in enumerate(entries):
         lbl_path = dataset_dir / e["split"] / "labels" / f"{e['id']}.txt"
         rows = _parse_label_per_snake(lbl_path)
+        if t == 0:
+            steps_counters = [0] * len(rows)
+        while len(steps_counters) < len(rows):
+            steps_counters.append(0)
         for si, curr in enumerate(rows):
-            hx, hy, fx, fy, xx, xy, has_x2 = curr
+            hx, hy, fx, fy, xx, xy, has_x2, is_dead = curr[:8]
             prev = prev_rows[si] if prev_rows and si < len(prev_rows) else None
             ate_food, ate_x2 = _infer_ate_events(prev, curr)
+            if ate_food:
+                steps_counters[si] = 0
+            else:
+                steps_counters[si] = steps_counters[si] + 1
+            steps_since_food = min(steps_counters[si] / 80.0, 1.0)
             snake_seqs[si].append({
                 "xc": hx, "yc": hy,
                 "fx": fx, "fy": fy, "xx": xx, "xy": xy, "has_x2": has_x2,
                 "ate_food": ate_food, "ate_x2": ate_x2,
+                "is_dead": is_dead, "steps_since_food": steps_since_food,
                 "t": t,
             })
         prev_rows = rows
@@ -266,7 +279,10 @@ def _process_one_episode(args: tuple) -> tuple[int, list[dict]]:
                 t = lbl["t"]
                 yolo_f = yolo_by_t.get(t)
                 if yolo_f:
-                    merged.append({**lbl, "xc": yolo_f["xc"], "yc": yolo_f["yc"]})
+                    merged.append({
+                        **lbl, "xc": yolo_f["xc"], "yc": yolo_f["yc"],
+                        "is_dead": yolo_f.get("is_dead", lbl["is_dead"]),
+                    })
                 else:
                     merged.append(lbl)
             snake_seqs[si] = merged

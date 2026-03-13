@@ -17,7 +17,7 @@ flowchart TB
     B -->|视觉路径| D
     C --> D
 
-    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧14维特征, 输入label或YOLO track"]
+    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧16维特征, 输入label或YOLO track"]
     D --> E
 
     E["5. 行为正确性 train_behavior 双向LSTM+注意力<br/>correct/incorrect + reason 共7类"]
@@ -37,14 +37,16 @@ flowchart TB
 | 5. 行为训练 | `train_behavior.py` | sequences 或 grid batches | `checkpoints/behavior/best.pt` |
 | 6. 视频演示 | `demo_video.py` | batch + 模型权重 | 带标注的 MP4 视频 |
 
-### 14 维基础特征 + 3 帧上下文（行为模型输入）
+### 16 维基础特征 + 3 帧上下文（行为模型输入）
 
 **特征约束**：仅使用 YOLO 能从图像检测到的信息（head/food/x2 位置），grid 与 track 两种路径完全一致。
 
-每帧每蛇基础特征：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2]`
+每帧每蛇基础特征：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2, is_dead, steps_since_food]`
 
 - `ate_food` / `ate_x2`：由连续帧 head/food/x2 位置推导，YOLO 推理时同样可计算
-- 训练时默认将**前后共 3 帧**（1 前 + 当前 + 1 后）合并为 1 帧输入（3×14=42 维）
+- `is_dead`：蛇是否已撞击死亡（YOLO 5 类时 class 4=`snake_head_dead` 表示圆形蛇头，label 路径从解析结果读取）
+- `steps_since_food`：自上次吃食物以来的帧数，归一化 `min(count/80, 1.0)`
+- 训练时默认将**前后共 3 帧**（1 前 + 当前 + 1 后）合并为 1 帧输入（3×16=48 维）
 
 ---
 
@@ -143,7 +145,7 @@ python data_generator.py --batches 10 --batch-size 100 -w 8
 # 2. 渲染与导出 YOLO 数据集（640×640，全帧；-w 8 多进程）
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 
-# 3. (可选) YOLO 训练（检测 snake_head/body, food, x2；imgsz 与渲染一致）
+# 3. (可选) YOLO 训练（5 类：snake_head, snake_body, food, x2, snake_head_dead；imgsz 与渲染一致）
 yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 
 # 4. 序列准备（二选一）

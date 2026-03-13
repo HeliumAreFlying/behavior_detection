@@ -70,12 +70,22 @@ def _infer_ate_from_scene(prev: dict | None, curr: dict) -> tuple[float, float]:
     return ate_food, ate_x2
 
 
-def _build_seq_features(scene_features: list[dict], input_dim: int) -> dict[int, list[list[float]]]:
-    """构建 14 维特征（与 YOLO 路径一致，仅用可检测的 head/food/x2），input_dim 仅用于兼容性判断。"""
+def _build_seq_features(scene_features: list[dict], input_dim: int, last_frame_reasons: dict[int, str] | None = None) -> dict[int, list[list[float]]]:
+    """构建 16 维特征（与 YOLO 路径一致），含 is_dead、steps_since_food。"""
     snake_seqs = {}
     num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
+    last_t_per_snake: dict[int, int] = {}
+    for t, sf in enumerate(scene_features):
+        for si in sf:
+            last_t_per_snake[si] = t
     for si in range(num_snakes):
         seq = []
+        steps_counter = 0
+        is_dead_last = 0.0
+        if last_frame_reasons and si in last_frame_reasons:
+            r = last_frame_reasons[si]
+            if r in ("self_collision", "snake_collision"):
+                is_dead_last = 1.0
         for t, sf in enumerate(scene_features):
             if si not in sf:
                 continue
@@ -85,6 +95,12 @@ def _build_seq_features(scene_features: list[dict], input_dim: int) -> dict[int,
             has_x2 = f["has_x2"]
             prev_f = scene_features[t - 1][si] if t > 0 and si in scene_features[t - 1] else None
             ate_food, ate_x2 = _infer_ate_from_scene(prev_f, f)
+            if ate_food:
+                steps_counter = 0
+            else:
+                steps_counter += 1
+            steps_since_food = min(steps_counter / 80.0, 1.0)
+            is_dead = is_dead_last if last_t_per_snake.get(si, -1) == t else 0.0
             if t > 0 and si in scene_features[t - 1]:
                 prev = scene_features[t - 1][si]
                 dx, dy = xc - prev["xc"], yc - prev["yc"]
@@ -95,7 +111,7 @@ def _build_seq_features(scene_features: list[dict], input_dim: int) -> dict[int,
             vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
             to_food = (fx - xc) * dx + (fy - yc) * dy
             move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-            feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2]
+            feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food]
             seq.append(feat)
         if len(seq) >= 2:
             snake_seqs[si] = seq
@@ -103,7 +119,7 @@ def _build_seq_features(scene_features: list[dict], input_dim: int) -> dict[int,
 
 
 def load_samples_from_track(path: Path, add_velocity: bool = True):
-    """从 track_sequences.json 加载样本，返回 (seq_list, label_list, reason_list)"""
+    """从 track_sequences.json 加载样本，返回 (seq_list, label_list, reason_list)。特征 16 维。"""
     from models.behavior_correctness import REASON_TO_IDX
     data = json.loads(path.read_text(encoding="utf-8"))
     seqs, labels, reasons = [], [], []
@@ -119,6 +135,8 @@ def load_samples_from_track(path: Path, add_velocity: bool = True):
             xx, xy = f.get("xx", 0.0), f.get("xy", 0.0)
             has_x2 = f.get("has_x2", 0.0)
             ate_food, ate_x2 = f.get("ate_food", 0.0), f.get("ate_x2", 0.0)
+            is_dead = f.get("is_dead", 0.0)
+            steps_since_food = f.get("steps_since_food", 0.0)
             df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
             dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
             if add_velocity and i > 0:
@@ -129,7 +147,7 @@ def load_samples_from_track(path: Path, add_velocity: bool = True):
                 move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
             else:
                 dx, dy, move_to_food = 0.0, 0.0, 0.0
-            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2])
+            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food])
         seqs.append(seq)
         labels.append(1 if rec.get("label") == "incorrect" else 0)
         reasons.append(REASON_TO_IDX.get(rec.get("reason", "in_progress"), REASON_TO_IDX["in_progress"]))
@@ -172,7 +190,8 @@ def load_samples_from_batches(
             else:
                 scene_features = [_scene_to_features(sc) for sc in scenes]
 
-            snake_seqs = _build_seq_features(scene_features, input_dim)
+            last_reasons = {si: anns[si].get("reason", "in_progress") for si in range(len(anns)) if si < len(anns)}
+            snake_seqs = _build_seq_features(scene_features, input_dim, last_frame_reasons=last_reasons)
             for si, seq in snake_seqs.items():
                 if si >= len(anns):
                     continue
@@ -262,12 +281,17 @@ def main():
         seqs, gt_labels, gt_reasons = seqs[: args.max_samples], gt_labels[: args.max_samples], gt_reasons[: args.max_samples]
     print(f"共 {len(seqs)} 条样本")
 
-    # 推理时需与训练一致的帧合并（前后 3+当前+3）。特征统一为 14 维（YOLO 可检测）
-    base_dim = 14
-    if input_dim == 8:
-        print("警告: 旧版 8 维 grid 模型已废弃，请用 track 数据重新训练。当前按 14 维处理。")
+    # 推理时需与训练一致的帧合并。新版 16 维，旧版 14 维
+    base_dim = 16
+    if input_dim in (14, 28, 42) or (input_dim >= 14 and input_dim % 14 == 0 and input_dim % 16 != 0):
+        base_dim = 14
+        print("使用 14 维特征（旧版 checkpoint，无 is_dead/steps_since_food）")
+    else:
+        base_dim = 16
     frame_ctx = input_dim // base_dim if input_dim >= base_dim and input_dim % base_dim == 0 else 1
     half = frame_ctx // 2
+    if base_dim == 14 and seqs and len(seqs[0][0]) > 14:
+        seqs = [[f[:14] for f in seq] for seq in seqs]
 
     def _merge_frame_context(seqs: list) -> list:
         if half <= 0:

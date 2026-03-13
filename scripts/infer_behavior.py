@@ -66,7 +66,9 @@ def main():
     if args.limit > 0:
         samples = samples[: args.limit]
 
-    base_dim = 14  # 两种路径统一 14 维（YOLO 可检测的 head/food/x2 及推导特征）
+    base_dim = 16
+    if input_dim in (14, 28, 42) or (input_dim >= 14 and input_dim % 14 == 0 and input_dim % 16 != 0):
+        base_dim = 14
     frame_ctx = input_dim // base_dim if input_dim >= base_dim and input_dim % base_dim == 0 else 1
     half = frame_ctx // 2
 
@@ -76,6 +78,8 @@ def main():
         n = len(seq)
         return [sum((seq[max(0, min(n - 1, i + j))] for j in range(-h, h + 1)), []) for i in range(n)]
 
+    if base_dim == 14 and samples and len(samples[0][0][0]) > 14:
+        samples = [([f[:14] for f in s[0]],) + s[1:] for s in samples]
     if half > 0:
         samples = [(_merge(s[0], base_dim, half),) + tuple(s[1:]) for s in samples]
 

@@ -71,12 +71,24 @@ def _infer_ate_from_scene(prev: dict | None, curr: dict) -> tuple[float, float]:
     return ate_food, ate_x2
 
 
-def _build_seq_features(scene_features: list[dict[int, dict]], input_dim: int = 14) -> dict[int, list[list[float]]]:
-    """构建 14 维特征（与 YOLO 路径一致，仅用可检测的 head/food/x2）。"""
+def _build_seq_features(
+    scene_features: list[dict[int, dict]], input_dim: int = 16, last_frame_reasons: dict[int, str] | None = None
+) -> dict[int, list[list[float]]]:
+    """构建 16 维特征（与 YOLO 路径一致），含 is_dead、steps_since_food。"""
     snake_seqs: dict[int, list[list[float]]] = {}
     num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
+    last_t_per_snake: dict[int, int] = {}
+    for t, sf in enumerate(scene_features):
+        for si in sf:
+            last_t_per_snake[si] = t
     for si in range(num_snakes):
         seq = []
+        steps_counter = 0
+        is_dead_last = 0.0
+        if last_frame_reasons and si in last_frame_reasons:
+            r = last_frame_reasons[si]
+            if r in ("self_collision", "snake_collision"):
+                is_dead_last = 1.0
         for t, sf in enumerate(scene_features):
             if si not in sf:
                 continue
@@ -87,6 +99,12 @@ def _build_seq_features(scene_features: list[dict[int, dict]], input_dim: int = 
             has_x2 = f["has_x2"]
             prev_f = scene_features[t - 1][si] if t > 0 and si in scene_features[t - 1] else None
             ate_food, ate_x2 = _infer_ate_from_scene(prev_f, f)
+            if ate_food:
+                steps_counter = 0
+            else:
+                steps_counter += 1
+            steps_since_food = min(steps_counter / 80.0, 1.0)
+            is_dead = is_dead_last if last_t_per_snake.get(si, -1) == t else 0.0
             if t > 0 and si in scene_features[t - 1]:
                 prev = scene_features[t - 1][si]
                 dx, dy = xc - prev["xc"], yc - prev["yc"]
@@ -97,7 +115,7 @@ def _build_seq_features(scene_features: list[dict[int, dict]], input_dim: int = 
             vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
             to_food = (fx - xc) * dx + (fy - yc) * dy
             move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-            feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2]
+            feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food]
             seq.append(feat)
         if len(seq) >= 2:
             snake_seqs[si] = seq
@@ -229,9 +247,17 @@ def main():
     else:
         scene_features_for_model = scene_features
         print(f"行为模型 input_dim={input_dim}, 全帧 {len(scene_features)} 帧")
-    snake_seqs = _build_seq_features(scene_features_for_model, 14)
+    base_dim = 16
+    if input_dim in (14, 28, 42) or (input_dim >= 14 and input_dim % 14 == 0 and input_dim % 16 != 0):
+        base_dim = 14
+    last_reasons = {si: gt_annotations[si].get("reason", "in_progress") for si in range(len(gt_annotations))}
+    snake_seqs = _build_seq_features(scene_features_for_model, base_dim, last_frame_reasons=last_reasons)
+    if base_dim == 14 and snake_seqs:
+        first_seq = next(iter(snake_seqs.values()))
+        if first_seq and len(first_seq[0]) > 14:
+            snake_seqs = {si: [f[:14] for f in seq] for si, seq in snake_seqs.items()}
 
-    def _merge_frame_context(seq: list[list[float]], base: int = 14, half: int = 1) -> list[list[float]]:
+    def _merge_frame_context(seq: list[list[float]], base: int = 16, half: int = 1) -> list[list[float]]:
         if half <= 0:
             return seq
         n = len(seq)
@@ -240,10 +266,10 @@ def main():
             for i in range(n)
         ]
 
-    frame_ctx = input_dim // 14 if input_dim >= 14 and input_dim % 14 == 0 else 1
+    frame_ctx = input_dim // base_dim if input_dim >= base_dim and input_dim % base_dim == 0 else 1
     half = frame_ctx // 2
     if half > 0:
-        snake_seqs = {si: _merge_frame_context(seq, 14, half) for si, seq in snake_seqs.items()}
+        snake_seqs = {si: _merge_frame_context(seq, base_dim, half) for si, seq in snake_seqs.items()}
 
     # 对每条蛇跑行为模型，取每个端点的预测
     snake_preds: dict[int, list[tuple[int, str, str, float]]] = defaultdict(list)
