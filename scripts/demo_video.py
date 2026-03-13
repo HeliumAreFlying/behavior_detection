@@ -1,5 +1,5 @@
 """
-实战测试：将对局记录渲染为视频，YOLO+行为模型联合标注，输出带标注的视频。
+实战测试：将对局记录渲染为视频，YOLO+行为模型联合标注，并同时展示真值（GT）以对比准确率。
 
 用法:
   python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -o demo.mp4
@@ -117,6 +117,9 @@ def main():
         print("该 episode 无场景")
         sys.exit(1)
 
+    # 真值（batch 中的 snake_annotations）
+    gt_annotations = ep.get("snake_annotations", [])
+
     pygame.init()
     pygame.display.set_mode((1, 1))
 
@@ -178,17 +181,22 @@ def main():
         reason = REASON_NAMES[pred_r]
         snake_preds[si] = [(len(seq) - 1, label, reason, ep_prob)]
 
-    # 每帧展示：仅对当前帧存在的蛇显示预测
-    labels_per_frame: dict[int, dict[int, tuple[str, str]]] = defaultdict(dict)
+    # 每帧展示：GT + 预测，用于对比
+    labels_per_frame: dict[int, dict[int, tuple[str, str, str, str, bool]]] = defaultdict(dict)
     for ti in range(len(scenes)):
         for si in scene_features[ti]:
+            gt_label = gt_annotations[si]["label"] if si < len(gt_annotations) else "?"
+            gt_reason = gt_annotations[si]["reason"] if si < len(gt_annotations) else "?"
             if si in snake_preds:
-                _, label, reason, _ = snake_preds[si][0]
-                labels_per_frame[ti][si] = (label, reason)
+                _, pred_label, pred_reason, _ = snake_preds[si][0]
+                match = gt_label == pred_label and gt_reason == pred_reason
+            else:
+                pred_label, pred_reason, match = "-", "-", False
+            labels_per_frame[ti][si] = (gt_label, gt_reason, pred_label, pred_reason, match)
 
     # 绘制并写视频
     h, w = frames_np[0].shape[:2]
-    panel_w = 200
+    panel_w = 280  # 加宽以容纳 GT + 预测对比
     out_h, out_w = h, w + panel_w
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(args.output, fourcc, args.fps, (out_w, out_h))
@@ -209,24 +217,50 @@ def main():
 
         canvas[:, :w] = frame
 
-        # 右侧标注面板
-        y0 = 20
+        # 右侧标注面板：GT（真值） vs Pred（LSTM 预测）
+        y0 = 15
+        cv2.putText(canvas, "GT vs LSTM", (w + 8, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
+        y0 += 22
         for si in sorted(labels_per_frame.get(ti, {}).keys()):
-            label, reason = labels_per_frame[ti][si]
-            color = (76, 175, 80) if label == "correct" else (244, 67, 54)
-            txt = f"蛇{si+1}: {'正确' if label == 'correct' else '错误'}"
-            cv2.putText(canvas, txt, (w + 10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            y0 += 25
-            reason_zh = REASON_ZH.get(reason, reason)
-            cv2.putText(canvas, reason_zh[:18], (w + 10, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-            y0 += 30
+            gt_label, gt_reason, pred_label, pred_reason, match = labels_per_frame[ti][si]
+            # 蛇编号
+            cv2.putText(canvas, f"Snake {si+1}", (w + 8, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1)
+            y0 += 18
+            # GT（真值）
+            gt_ok = gt_label == "correct"
+            cv2.putText(canvas, "GT:", (w + 8, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (160, 160, 160), 1)
+            cv2.putText(canvas, ("OK" if gt_ok else "NG") + " " + (REASON_ZH.get(gt_reason, gt_reason)[:10]),
+                        (w + 38, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (76, 175, 80) if gt_ok else (244, 67, 54), 1)
+            y0 += 16
+            # Pred（预测）
+            pred_ok = (pred_label == "correct") if pred_label != "-" else None
+            cv2.putText(canvas, "Pred:", (w + 8, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (160, 160, 160), 1)
+            pred_txt = (("OK" if pred_ok else "NG") + " " + REASON_ZH.get(pred_reason, pred_reason)[:10]) if pred_label != "-" else "-"
+            pred_color = (76, 175, 80) if pred_ok else (244, 67, 54) if pred_ok is False else (150, 150, 150)
+            cv2.putText(canvas, pred_txt, (w + 38, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.35, pred_color, 1)
+            # 一致性
+            match_txt = " [OK]" if match else " [X]"
+            match_color = (76, 175, 80) if match else (244, 67, 54)
+            cv2.putText(canvas, match_txt, (w + 200, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.35, match_color, 1)
+            y0 += 22
 
-        cv2.putText(canvas, f"Frame {ti+1}/{len(frames_np)}", (w + 10, out_h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        cv2.putText(canvas, f"Frame {ti+1}/{len(frames_np)}", (w + 8, out_h - 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (120, 120, 120), 1)
         writer.write(canvas)
 
     writer.release()
+
+    # 统计准确率
+    n_total = len(snake_preds)
+    n_match = 0
+    for si in snake_preds:
+        for ti in range(len(scenes)):
+            if si in labels_per_frame.get(ti, {}):
+                n_match += 1 if labels_per_frame[ti][si][4] else 0
+                break
+    acc = n_match / n_total * 100 if n_total else 0
     print(f"已输出: {args.output}")
+    print(f"真值 vs LSTM 预测: {n_match}/{n_total} 一致, 准确率 {acc:.1f}%")
 
 
 if __name__ == "__main__":
