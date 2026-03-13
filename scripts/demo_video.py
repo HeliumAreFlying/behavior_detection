@@ -7,9 +7,13 @@
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 from collections import defaultdict
+
+# 无头环境下抑制 pygame/SDL 的 ALSA 音频警告（不影响渲染）
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -85,6 +89,7 @@ def main():
     p.add_argument("--output", "-o", default="demo_annotated.mp4", help="输出视频路径")
     p.add_argument("--fps", type=int, default=8, help="视频帧率")
     p.add_argument("--draw-boxes", action="store_true", help="绘制 YOLO 检测框")
+    p.add_argument("--label-only", action="store_true", help="仅按 correct/incorrect 判定一致，不要求 reason 相同")
     args = p.parse_args()
 
     try:
@@ -189,7 +194,7 @@ def main():
             gt_reason = gt_annotations[si]["reason"] if si < len(gt_annotations) else "?"
             if si in snake_preds:
                 _, pred_label, pred_reason, _ = snake_preds[si][0]
-                match = gt_label == pred_label and gt_reason == pred_reason
+                match = (gt_label == pred_label and gt_reason == pred_reason) if not args.label_only else (gt_label == pred_label)
             else:
                 pred_label, pred_reason, match = "-", "-", False
             labels_per_frame[ti][si] = (gt_label, gt_reason, pred_label, pred_reason, match)
@@ -253,14 +258,25 @@ def main():
     # 统计准确率
     n_total = len(snake_preds)
     n_match = 0
+    n_label_match = 0  # 仅 label 一致
     for si in snake_preds:
         for ti in range(len(scenes)):
             if si in labels_per_frame.get(ti, {}):
-                n_match += 1 if labels_per_frame[ti][si][4] else 0
+                gt_l, gt_r, pred_l, pred_r, m = labels_per_frame[ti][si]
+                n_match += 1 if m else 0
+                n_label_match += 1 if (gt_l == pred_l and pred_l != "-") else 0
                 break
     acc = n_match / n_total * 100 if n_total else 0
+    label_acc = n_label_match / n_total * 100 if n_total else 0
     print(f"已输出: {args.output}")
-    print(f"真值 vs LSTM 预测: {n_match}/{n_total} 一致, 准确率 {acc:.1f}%")
+    print(f"真值 vs LSTM: {n_match}/{n_total} 完全一致(label+reason), {n_label_match}/{n_total} label一致")
+    print(f"  完全一致准确率 {acc:.1f}%, label 准确率 {label_acc:.1f}%")
+    for si in sorted(snake_preds.keys()):
+        for ti in range(len(scenes)):
+            if si in labels_per_frame.get(ti, {}):
+                gt_l, gt_r, pred_l, pred_r, _ = labels_per_frame[ti][si]
+                print(f"  蛇{si+1}: GT={gt_l}/{gt_r}  Pred={pred_l}/{pred_r}")
+                break
 
 
 if __name__ == "__main__":
