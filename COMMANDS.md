@@ -59,3 +59,13 @@ python scripts/infer_behavior.py --model checkpoints/behavior/best.pt --data seq
 ```bash
 python scripts/infer_behavior.py -m checkpoints/behavior/best.pt -d grid --batches batches/
 ```
+
+## 9. 实战演示视频（YOLO + 行为联合标注）
+
+```bash
+# 仅行为标注
+python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -o demo.mp4
+
+# YOLO 框 + 行为标注
+python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c checkpoints/behavior/best.pt -o demo.mp4 --draw-boxes
+```
