@@ -315,7 +315,7 @@ def main():
             weights = [w * (args.incorrect_weight if s[1] == 1 else 1.0) for w, s in zip(weights, data)]
         return weights
 
-    def _merge_frame_context(self, seq: list, base_dim: int, half: int) -> list:
+    def _merge_frame_context(seq: list, base_dim: int, half: int) -> list:
         """将前后各 half 帧并入当前帧。seq 每项 base_dim 维，输出每项 base_dim*(2*half+1) 维。"""
         if half <= 0:
             return seq
