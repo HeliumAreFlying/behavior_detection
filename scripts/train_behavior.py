@@ -415,7 +415,7 @@ def main():
         dropout=args.dropout,
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=25, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=25)
 
     def _focal_loss(logits, targets, gamma, weight=None):
         ce = nn.functional.cross_entropy(logits, targets, reduction="none")
