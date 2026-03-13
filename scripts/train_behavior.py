@@ -470,11 +470,9 @@ def main():
                 loss = 0.5 * (loss_c + loss_r)
                 train_correct += (logits_c[mask].argmax(1) == y_label[mask]).sum().item()
                 train_total += mask.sum().item()
-            else:
-                loss = x.new_zeros(1)
-            loss.backward()
-            opt.step()
-            train_loss += loss.item()
+                loss.backward()
+                opt.step()
+                train_loss += loss.item()
 
         model.eval()
         val_correct = 0

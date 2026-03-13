@@ -293,7 +293,7 @@ def main():
     with torch.no_grad():
         for seq in seqs:
             x = torch.tensor([seq], dtype=torch.float32)
-            logits_c, logits_r, _ = model(x, None)
+            logits_c, logits_r = model(x, None)
             prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()[0]
             pred_r = logits_r.argmax(1).item()
             pred_reasons.append(pred_r)

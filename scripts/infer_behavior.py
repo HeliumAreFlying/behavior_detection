@@ -87,7 +87,7 @@ def main():
             seq, label_true, reason_true = item[0], item[1], item[2]
             x = torch.tensor([seq], dtype=torch.float32)
             lengths = torch.tensor([len(seq)], dtype=torch.long)
-            logits_c, logits_r, _ = model(x, lengths)
+            logits_c, logits_r = model(x, lengths)
             prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()[0]
             pred_c = 1 if prob_c[1] >= thresh else 0
             pred_r = logits_r.argmax(1).item()
