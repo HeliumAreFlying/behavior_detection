@@ -202,6 +202,8 @@ def main():
     p.add_argument("--hidden", type=int, default=128, help="LSTM 隐藏维")
     p.add_argument("--lstm-layers", type=int, default=2, help="LSTM 层数")
     p.add_argument("--dropout", type=float, default=0.3, help="LSTM dropout")
+    p.add_argument("--no-bidirectional", action="store_true", help="禁用双向 LSTM")
+    p.add_argument("--no-attention", action="store_true", help="禁用自注意力")
     p.add_argument("--label-smoothing", type=float, default=0.1, help="CE label smoothing")
     p.add_argument("--input-dim", type=int, default=0,
                    help="0=自动: 14*frame_context，默认 14*3=42")
@@ -413,6 +415,8 @@ def main():
         hidden_dim=args.hidden,
         num_layers=args.lstm_layers,
         dropout=args.dropout,
+        bidirectional=not args.no_bidirectional,
+        use_attention=not args.no_attention,
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=25)
@@ -505,6 +509,8 @@ def main():
                 "input_dim": input_dim,
                 "hidden_dim": args.hidden,
                 "num_layers": args.lstm_layers,
+                "bidirectional": not args.no_bidirectional,
+                "use_attention": not args.no_attention,
             }, out_dir / "best.pt")
         torch.save({
             "epoch": ep,
@@ -512,6 +518,8 @@ def main():
             "input_dim": input_dim,
             "hidden_dim": args.hidden,
             "num_layers": args.lstm_layers,
+            "bidirectional": not args.no_bidirectional,
+            "use_attention": not args.no_attention,
         }, out_dir / "last.pt")
         if (ep + 1) % 10 == 0 or ep == 0:
             print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} "

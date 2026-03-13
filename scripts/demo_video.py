@@ -194,10 +194,16 @@ def main():
         input_dim = ckpt.get("input_dim", 12)
         hidden_dim = ckpt.get("hidden_dim", 128)
         num_layers = ckpt.get("num_layers", 2)
+        bidirectional = ckpt.get("bidirectional", False)
+        use_attention = ckpt.get("use_attention", False)
     else:
         state, input_dim, hidden_dim, num_layers = ckpt, 12, 128, 2
+        bidirectional, use_attention = False, False
 
-    beh_model = BehaviorCorrectnessModel(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers)
+    beh_model = BehaviorCorrectnessModel(
+        input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers,
+        bidirectional=bidirectional, use_attention=use_attention,
+    )
     beh_model.load_state_dict(state)
     beh_model.eval()
 

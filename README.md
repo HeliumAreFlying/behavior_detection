@@ -17,10 +17,10 @@ flowchart TB
     B -->|视觉路径| D
     C --> D
 
-    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧12维特征, 输入label或YOLO track"]
+    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧14维特征, 输入label或YOLO track"]
     D --> E
 
-    E["5. 行为正确性 train_behavior LSTM<br/>correct/incorrect + reason 共7类"]
+    E["5. 行为正确性 train_behavior 双向LSTM+注意力<br/>correct/incorrect + reason 共7类"]
     E --> F
 
     F["6. 实战演示 demo_video<br/>对局渲染, YOLO框+行为标注, 输出MP4"]
@@ -37,7 +37,7 @@ flowchart TB
 | 5. 行为训练 | `train_behavior.py` | sequences 或 grid batches | `checkpoints/behavior/best.pt` |
 | 6. 视频演示 | `demo_video.py` | batch + 模型权重 | 带标注的 MP4 视频 |
 
-### 14 维基础特征 + 7 帧上下文（行为模型输入）
+### 14 维基础特征 + 3 帧上下文（行为模型输入）
 
 **特征约束**：仅使用 YOLO 能从图像检测到的信息（head/food/x2 位置），grid 与 track 两种路径完全一致。
 
@@ -145,7 +145,7 @@ python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d 
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
 
-# 6. 评估（可调 --incorrect-threshold 0.3 提升错误召回率）
+# 6. 评估（默认自动搜索最优 F1 阈值）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
 # 7. 演示视频（路径 B 可加 -m YOLO权重 --draw-boxes）
@@ -187,12 +187,17 @@ python scripts/run_track_and_prepare.py -m yolov8n.pt -d dataset -o sequences
 
 ### 5. 行为模型训练
 
+模型结构：**双向 LSTM + 自注意力**（可用 `--no-bidirectional --no-attention` 禁用以兼容旧版）。
+
 ```bash
 # 纯网格（推荐先验证）
 python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior
 
 # 序列数据（错误检测率低时加 --boost-incorrect）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior --boost-incorrect
+
+# 禁用新结构（与旧 checkpoint 一致）
+python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --no-bidirectional --no-attention
 ```
 
 ### 6. 实战演示视频
@@ -205,14 +210,19 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/beh
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c checkpoints/behavior/best.pt -o demo.mp4 --draw-boxes
 ```
 
-### 7. 全量评估（P、R、F1、mAP）
+### 7. 全量评估（P、R、mAP50、mAP50-95）
+
+默认自动搜索最优 F1 的阈值，输出 YOLO 风格表格（表头 P/R/mAP50/mAP50-95，每类 + all）。
 
 ```bash
 # 从 track_sequences（推荐，与训练格式一致）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
-# 提升错误召回率：降低阈值或启用 reason-override
-python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --incorrect-threshold 0.3 --reason-override
+# 使用固定阈值：--no-threshold-search --incorrect-threshold 0.9
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --no-threshold-search --incorrect-threshold 0.9
+
+# 提升错误召回率：--reason-override
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --reason-override
 
 # 从 batches
 python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
@@ -259,7 +269,7 @@ behavior_detection/
 │   ├── infer_behavior.py       # 行为推理
 │   └── demo_video.py           # 实战演示视频
 ├── models/
-│   └── behavior_correctness.py # LSTM 行为/正确性模型
+│   └── behavior_correctness.py # 双向LSTM+注意力 行为/正确性模型
 ├── batches/                 # 生成的对局数据
 ├── dataset/                 # 渲染输出的 YOLO 数据集
 ├── sequences/               # 序列特征

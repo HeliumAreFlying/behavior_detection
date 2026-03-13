@@ -31,17 +31,22 @@ def main():
     args = p.parse_args()
 
     ckpt = torch.load(args.model, map_location="cpu", weights_only=False)
-    # 兼容旧格式
     if isinstance(ckpt, dict) and "model_state" in ckpt:
         state = ckpt["model_state"]
         input_dim = ckpt.get("input_dim", 4)
         hidden_dim = ckpt.get("hidden_dim", 64)
         num_layers = ckpt.get("num_layers", 1)
+        bidirectional = ckpt.get("bidirectional", False)
+        use_attention = ckpt.get("use_attention", False)
     else:
         state = ckpt
         input_dim, hidden_dim, num_layers = 4, 64, 1
+        bidirectional, use_attention = False, False
 
-    model = BehaviorCorrectnessModel(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers)
+    model = BehaviorCorrectnessModel(
+        input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers,
+        bidirectional=bidirectional, use_attention=use_attention,
+    )
     model.load_state_dict(state)
     model.eval()
 

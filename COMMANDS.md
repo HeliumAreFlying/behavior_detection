@@ -7,8 +7,8 @@
 | `data_generator.py` | `-w 8` | - |
 | `render_and_export.py` | `-w 8` | - |
 | `run_track_and_prepare.py` | `-w 8`（from-labels 时） | - |
-| `train_behavior.py` | - | `--boost-incorrect` 一键提升错误检测率；`--focal-loss` `--incorrect-weight 2` |
-| `eval_behavior.py` | - | `--incorrect-threshold 0.3` 提升错误召回；`--reason-override` |
+| `train_behavior.py` | - | `--boost-incorrect` 一键提升错误检测率；`--no-bidirectional --no-attention` 禁用新结构 |
+| `eval_behavior.py` | - | 默认自动搜索最优 F1 阈值；`--no-threshold-search` 使用固定阈值；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
 
 > Ctrl+C 可安全中断多进程脚本，不会卡死。
@@ -38,7 +38,7 @@ python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d 
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
 
-# 6. 评估（--incorrect-threshold 0.3 可提升错误召回率）
+# 6. 评估（默认自动搜索最优 F1 阈值，输出 P/R/mAP50/mAP50-95）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
 # 7. 演示视频（路径 B 可加 -m YOLO权重 --draw-boxes）
@@ -95,7 +95,7 @@ python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d 
 python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior --epochs 100
 ```
 
-## 7. 行为模型训练（序列数据）
+## 7. 行为模型训练（序列数据，默认双向 LSTM + 注意力）
 
 ```bash
 python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
@@ -111,6 +111,9 @@ python scripts/train_behavior.py --data sequences/track_sequences.json -o checkp
 # 错误检测率低时使用 --boost-incorrect
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02
+
+# 禁用双向 LSTM / 自注意力（兼容旧 checkpoint）
+python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --no-bidirectional --no-attention
 ```
 
 ## 8. 行为模型推理
@@ -146,14 +149,17 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c b
 python scripts/verify_pipeline.py -b batches/batch_00000.json -e 0 -d dataset
 ```
 
-## 11. 全量评估（P、R、F1、mAP）
+## 11. 全量评估（P、R、mAP50、mAP50-95，YOLO 风格表格）
 
 ```bash
-# 从 track_sequences 评估（与训练格式一致）
+# 从 track_sequences 评估（默认自动搜索最优 F1 阈值）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
-# 提升错误召回率：--incorrect-threshold 0.3、--reason-override
-python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --incorrect-threshold 0.3 --reason-override
+# 使用固定阈值
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --no-threshold-search --incorrect-threshold 0.9
+
+# --reason-override：reason 为错误类时强制 label=incorrect
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --reason-override
 
 # 从 batches 评估（需 dataset metadata）
 python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
