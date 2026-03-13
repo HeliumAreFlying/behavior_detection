@@ -144,35 +144,42 @@ def main():
             print(f"[WARN] 跳过 {batch_name} ep{ep_idx}: 缺少 {len(missing)} 张图")
             continue
 
-        # YOLO track，persist=True 保持跨帧 track_id
+        # YOLO track，persist=True 保持跨帧 track_id；显式指定 tracker 便于多目标稳定分配 ID
         results = model.track(
             source=[str(p) for p in img_paths],
             persist=True,
+            tracker="bytetrack.yaml",
             device=device,
             verbose=False,
             stream=True,
         )
         results_list = list(results)
 
-        # 首帧 label 文件提供 GT 蛇头位置，用于 track -> snake 匹配
-        first_entry = entries[0]
-        lbl_path = dataset_dir / first_entry["split"] / "labels" / f"{first_entry['id']}.txt"
+        # 找到第一个有 track_id 的帧（首帧可能 id=None），用于 track -> snake 匹配
+        head_dets: list[tuple[int, float, float]] = []
+        match_frame_idx = -1
+        for t, res in enumerate(results_list):
+            if res is None or res.boxes is None or res.boxes.id is None:
+                continue
+            for i in range(len(res.boxes)):
+                if int(res.boxes.cls[i]) != CLASS_HEAD:
+                    continue
+                tid = int(res.boxes.id[i])
+                xc, yc = float(res.boxes.xywhn[i][0]), float(res.boxes.xywhn[i][1])
+                head_dets.append((tid, xc, yc))
+            if head_dets:
+                match_frame_idx = t
+                break
+
+        if match_frame_idx < 0 or not head_dets:
+            continue
+
+        # 用同一帧的 label 提供 GT 蛇头位置（归一化坐标）
+        match_entry = entries[match_frame_idx]
+        lbl_path = dataset_dir / match_entry["split"] / "labels" / f"{match_entry['id']}.txt"
         gt_heads = _gt_heads_from_labels(lbl_path)
         if not gt_heads:
             continue
-
-        # 首帧蛇头检测
-        head_dets: list[tuple[int, float, float]] = []
-        r0 = results_list[0] if results_list else None
-        if r0 and r0.boxes is not None:
-            for i in range(len(r0.boxes)):
-                if int(r0.boxes.cls[i]) != CLASS_HEAD:
-                    continue
-                tid = int(r0.boxes.id[i]) if r0.boxes.id is not None else None
-                if tid is None:
-                    continue
-                xc, yc = float(r0.boxes.xywhn[i][0]), float(r0.boxes.xywhn[i][1])
-                head_dets.append((tid, xc, yc))
 
         track_to_snake = match_tracks_to_snakes(head_dets, gt_heads)
         snake_seqs = extract_head_features_per_frame(results_list, track_to_snake)
