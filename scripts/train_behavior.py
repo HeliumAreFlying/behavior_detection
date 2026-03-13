@@ -165,7 +165,7 @@ def main():
                    help="输出目录")
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument("--lr", type=float, default=1e-4, help="学习率")
+    p.add_argument("--lr", type=float, default=3e-4, help="学习率")
     p.add_argument("--hidden", type=int, default=128, help="LSTM 隐藏维")
     p.add_argument("--lstm-layers", type=int, default=2, help="LSTM 层数")
     p.add_argument("--dropout", type=float, default=0.3, help="LSTM dropout")
