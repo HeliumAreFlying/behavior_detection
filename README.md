@@ -123,7 +123,7 @@ python data_generator.py --batches 10 --batch-size 100
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5
 
 # 3. (可选) YOLO 训练（检测 snake_head/body, food, x2）
-yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=600 batch=64
+yolo train model=yolov26n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 
 # 4. 序列准备（二选一）
 # 路径 A：纯 label，无需 YOLO
