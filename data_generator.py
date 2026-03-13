@@ -162,6 +162,21 @@ def run_episode(
     }
 
 
+def _pool_join_timeout(pool, timeout: float = 3.0) -> None:
+    """等待 Pool 子进程退出，每个进程最多等待 timeout 秒，避免 join() 无限阻塞"""
+    import time
+    if not hasattr(pool, "_pool"):
+        return
+    t0 = time.perf_counter()
+    for p in pool._pool:
+        remain = max(0, timeout - (time.perf_counter() - t0))
+        if remain > 0 and p.is_alive():
+            p.join(timeout=remain)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=1.0)
+
+
 def _generate_one_batch(args: tuple) -> int:
     """生成单个 batch（子进程调用）"""
     batch_id, batch_size, output_dir, kwargs = args
@@ -207,11 +222,25 @@ def generate_dataset(
     else:
         work_items = [(b, batch_size, str(out), kwargs) for b in range(num_batches)]
         print(f"使用 {workers} 个进程并行生成...")
-        with mp.Pool(processes=workers) as pool:
+        pool = mp.Pool(processes=workers)
+        interrupted = False
+        try:
             for idx, batch_id in enumerate(
                 pool.imap_unordered(_generate_one_batch, work_items, chunksize=1)
             ):
                 print(f"Batch {batch_id + 1}/{num_batches} -> {out / f'batch_{batch_id:05d}.json'}", flush=True)
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\n[中断] 用户取消，正在终止工作进程...", flush=True)
+            pool.terminate()
+            _pool_join_timeout(pool, timeout=3.0)
+            raise SystemExit(130)
+        finally:
+            if interrupted:
+                pass  # 已在 except 中 terminate + _pool_join_timeout，主进程退出时 OS 会回收
+            else:
+                pool.close()
+                pool.join()
 
     print(f"完成：共 {total} 局，{num_batches} 个 batch -> {out}")
 

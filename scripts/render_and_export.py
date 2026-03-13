@@ -151,6 +151,21 @@ def render_scene(scene: dict) -> "pygame.Surface":
     return screen
 
 
+def _pool_join_timeout(pool, timeout: float = 3.0) -> None:
+    """等待 Pool 子进程退出，每个进程最多等待 timeout 秒，避免 join() 无限阻塞"""
+    import time
+    if not hasattr(pool, "_pool"):
+        return
+    t0 = time.perf_counter()
+    for p in pool._pool:
+        remain = max(0, timeout - (time.perf_counter() - t0))
+        if remain > 0 and p.is_alive():
+            p.join(timeout=remain)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=1.0)
+
+
 def _init_pygame_worker():
     """子进程内初始化 pygame（仅渲染，无需显示）"""
     os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -284,11 +299,23 @@ def main():
                 print(f"已处理 {idx + 1}/{n} ...")
     else:
         print(f"使用 {workers} 个进程并行渲染...")
-        with mp.Pool(processes=workers, initializer=_init_pygame_worker) as pool:
+        pool = mp.Pool(processes=workers, initializer=_init_pygame_worker)
+        interrupted = False
+        try:
             for idx, meta in enumerate(pool.imap(_process_one_item, work_items, chunksize=chunksize)):
                 metadata_list.append(meta)
                 if (idx + 1) % 500 == 0:
                     print(f"已处理 {idx + 1}/{n} ...")
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\n[中断] 用户取消，正在终止工作进程...", flush=True)
+            pool.terminate()
+            _pool_join_timeout(pool, timeout=3.0)
+            raise SystemExit(130)
+        finally:
+            if not interrupted:
+                pool.close()
+                pool.join()
 
     # data.yaml for YOLO
     abs_path = output_dir.resolve()

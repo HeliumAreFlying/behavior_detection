@@ -154,6 +154,21 @@ _worker_model = None
 _worker_device = None
 
 
+def _pool_join_timeout(pool, timeout: float = 3.0) -> None:
+    """等待 Pool 子进程退出，每个进程最多等待 timeout 秒，避免 join() 无限阻塞"""
+    import time
+    if not hasattr(pool, "_pool"):
+        return
+    t0 = time.perf_counter()
+    for p in pool._pool:
+        remain = max(0, timeout - (time.perf_counter() - t0))
+        if remain > 0 and p.is_alive():
+            p.join(timeout=remain)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=1.0)
+
+
 def _init_yolo_worker(model_path: str, device: str) -> None:
     """子进程内加载 YOLO 模型"""
     global _worker_model, _worker_device
@@ -375,23 +390,29 @@ def main():
                 print(f"已处理 {ki + 1}/{len(episode_keys)} episodes, 共 {len(all_sequences)} 条蛇序列")
     else:
         print(f"使用 {workers} 个进程并行处理...")
-        if not args.from_labels:
-            with mp.Pool(processes=workers, initializer=_init_yolo_worker,
-                         initargs=(args.model, device)) as pool:
-                processed = 0
-                for ki, ep_seqs in pool.imap_unordered(_process_one_episode, work_items, chunksize=1):
-                    all_sequences.extend(ep_seqs)
-                    processed += 1
-                    if processed % 50 == 0 or processed == len(episode_keys):
-                        print(f"已处理 {processed}/{len(episode_keys)} episodes, 共 {len(all_sequences)} 条蛇序列", flush=True)
-        else:
-            with mp.Pool(processes=workers) as pool:
-                processed = 0
-                for ki, ep_seqs in pool.imap_unordered(_process_one_episode, work_items, chunksize=1):
-                    all_sequences.extend(ep_seqs)
-                    processed += 1
-                    if processed % 50 == 0 or processed == len(episode_keys):
-                        print(f"已处理 {processed}/{len(episode_keys)} episodes, 共 {len(all_sequences)} 条蛇序列", flush=True)
+        pool = (
+            mp.Pool(processes=workers, initializer=_init_yolo_worker, initargs=(args.model, device))
+            if not args.from_labels
+            else mp.Pool(processes=workers)
+        )
+        interrupted = False
+        try:
+            processed = 0
+            for ki, ep_seqs in pool.imap_unordered(_process_one_episode, work_items, chunksize=1):
+                all_sequences.extend(ep_seqs)
+                processed += 1
+                if processed % 50 == 0 or processed == len(episode_keys):
+                    print(f"已处理 {processed}/{len(episode_keys)} episodes, 共 {len(all_sequences)} 条蛇序列", flush=True)
+        except KeyboardInterrupt:
+            interrupted = True
+            print("\n[中断] 用户取消，正在终止工作进程...", flush=True)
+            pool.terminate()
+            _pool_join_timeout(pool, timeout=3.0)
+            raise SystemExit(130)
+        finally:
+            if not interrupted:
+                pool.close()
+                pool.join()
 
     out_path = output_dir / "track_sequences.json"
     out_path.write_text(json.dumps(all_sequences, ensure_ascii=False, indent=2), encoding="utf-8")
