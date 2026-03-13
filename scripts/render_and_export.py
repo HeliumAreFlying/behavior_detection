@@ -4,8 +4,16 @@
 """
 
 import json
+import os
 import sys
+import warnings
 from pathlib import Path
+
+# 无头环境下抑制 pygame/SDL 的 ALSA 音频警告（不影响渲染）
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+# 抑制 pkg_resources 弃用警告（来自 pygame 内部）
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
 
 # 项目根目录
 ROOT = Path(__file__).resolve().parent.parent
@@ -143,6 +151,30 @@ def render_scene(scene: dict) -> "pygame.Surface":
     return screen
 
 
+def _init_pygame_worker():
+    """子进程内初始化 pygame（仅渲染，无需显示）"""
+    os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+    pygame.init()
+    pygame.display.set_mode((1, 1))
+
+
+def _process_one_item(item: tuple) -> dict:
+    """处理单个样本：渲染 + 保存（在子进程中调用）"""
+    scene, img_path, lbl_path, beh_path, metadata = item
+    surf = render_scene(scene)
+    pygame.image.save(surf, img_path)
+
+    bboxes = scene_to_bboxes(scene)
+    lbl_lines = [f"{c} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}" for c, xc, yc, w, h in bboxes]
+    Path(lbl_path).write_text("\n".join(lbl_lines), encoding="utf-8")
+
+    snake_ann = scene.get("snake_annotations", [])
+    beh_data = {"snake_annotations": snake_ann}
+    Path(beh_path).write_text(json.dumps(beh_data, ensure_ascii=False), encoding="utf-8")
+
+    return metadata
+
+
 def is_key_frame(scene: dict, prev_scene: dict | None, is_last: bool, ep_reason: str) -> bool:
     """判断是否为关键帧：吃到食物/x2、超时刷新、碰撞等"""
     if prev_scene is None:
@@ -168,18 +200,19 @@ def is_key_frame(scene: dict, prev_scene: dict | None, is_last: bool, ep_reason:
 
 def main():
     import argparse
+    import multiprocessing as mp
     import random
     p = argparse.ArgumentParser(description="渲染 batch JSON 为 YOLO 数据集")
     p.add_argument("--batches", "-b", default=None, help="batch 目录，默认 batches/")
     p.add_argument("--output", "-o", default="dataset", help="输出根目录")
     p.add_argument("--val-ratio", type=float, default=0.2, help="验证集比例")
     p.add_argument("--skip-n", type=int, default=5, help="非关键帧每 N 帧采样 1 帧，1 表示不跳帧")
+    p.add_argument("--workers", "-w", type=int, default=None, help="并行进程数，默认 CPU 核心数")
     args = p.parse_args()
 
     batches_dir = Path(args.batches or ROOT / "batches")
     output_dir = Path(args.output or ROOT / "dataset")
     skip_n = max(1, args.skip_n)  # 0 表示不跳帧
-
     batch_files = sorted(batches_dir.glob("batch_*.json"))
     if not batch_files:
         print(f"未找到 batch 文件: {batches_dir}/batch_*.json")
@@ -193,9 +226,6 @@ def main():
     val_beh = output_dir / "val" / "behavior"
     for d in (train_img, train_lbl, train_beh, val_img, val_lbl, val_beh):
         d.mkdir(parents=True, exist_ok=True)
-
-    pygame.init()
-    pygame.display.set_mode((1, 1))
 
     all_samples: list[tuple[dict, int, int, str]] = []
     for bf in batch_files:
@@ -213,6 +243,7 @@ def main():
                     all_samples.append((scene, ep_idx, sc_idx, bf.name))
 
     n = len(all_samples)
+    workers = min(args.workers or (mp.cpu_count() or 4), n)  # 不超过任务数
     val_n = int(n * args.val_ratio)
     train_n = n - val_n
     indices = list(range(n))
@@ -221,40 +252,43 @@ def main():
     train_idx = set(indices[:train_n])
     val_idx = set(indices[train_n:])
 
-    metadata_list: list[dict] = []
-    global_idx = 0
-    for i, (scene, ep_idx, sc_idx, batch_name) in enumerate(all_samples):
-        split = "val" if i in val_idx else "train"
+    # 构建任务列表：(scene, img_path, lbl_path, beh_path, metadata)
+    work_items: list[tuple] = []
+    for global_idx in range(n):
+        scene, ep_idx, sc_idx, batch_name = all_samples[global_idx]
+        split = "val" if global_idx in val_idx else "train"
         img_dir = output_dir / split / "images"
         lbl_dir = output_dir / split / "labels"
         beh_dir = output_dir / split / "behavior"
         name = f"{global_idx:06d}"
-        img_path = img_dir / f"{name}.png"
-        lbl_path = lbl_dir / f"{name}.txt"
-        beh_path = beh_dir / f"{name}.json"
+        metadata = {"id": name, "split": split, "batch": batch_name, "episode": ep_idx, "scene": sc_idx}
+        work_items.append((
+            scene,
+            str(img_dir / f"{name}.png"),
+            str(lbl_dir / f"{name}.txt"),
+            str(beh_dir / f"{name}.json"),
+            metadata,
+        ))
 
-        surf = render_scene(scene)
-        pygame.image.save(surf, img_path)
+    # 按 indices 顺序处理，确保 train/val 划分正确；work_items 已按 global_idx 排序
+    metadata_list: list[dict] = []
+    chunksize = max(1, n // (workers * 4))  # 适度分块减少 IPC
 
-        bboxes = scene_to_bboxes(scene)
-        lbl_lines = [f"{c} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}" for c, xc, yc, w, h in bboxes]
-        lbl_path.write_text("\n".join(lbl_lines), encoding="utf-8")
-
-        # 行为正确性标签：每蛇的 label + reason（针对当前食物）
-        snake_ann = scene.get("snake_annotations", [])
-        beh_data = {"snake_annotations": snake_ann}
-        beh_path.write_text(json.dumps(beh_data, ensure_ascii=False), encoding="utf-8")
-
-        metadata_list.append({
-            "id": name,
-            "split": split,
-            "batch": batch_name,
-            "episode": ep_idx,
-            "scene": sc_idx,
-        })
-        global_idx += 1
-        if global_idx % 500 == 0:
-            print(f"已处理 {global_idx}/{n} ...")
+    if workers <= 1:
+        # 单进程：主进程直接渲染，避免多进程开销
+        pygame.init()
+        pygame.display.set_mode((1, 1))
+        for idx, item in enumerate(work_items):
+            metadata_list.append(_process_one_item(item))
+            if (idx + 1) % 500 == 0:
+                print(f"已处理 {idx + 1}/{n} ...")
+    else:
+        print(f"使用 {workers} 个进程并行渲染...")
+        with mp.Pool(processes=workers, initializer=_init_pygame_worker) as pool:
+            for idx, meta in enumerate(pool.imap(_process_one_item, work_items, chunksize=chunksize)):
+                metadata_list.append(meta)
+                if (idx + 1) % 500 == 0:
+                    print(f"已处理 {idx + 1}/{n} ...")
 
     # data.yaml for YOLO
     abs_path = output_dir.resolve()
@@ -273,7 +307,7 @@ names: {CLASS_NAMES}
         json.dumps(metadata_list, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    print(f"完成: train {train_n}, val {val_n}, 总计 {n} (跳帧 skip_n={skip_n})")
+    print(f"完成: train {train_n}, val {val_n}, 总计 {n} (跳帧 skip_n={skip_n}, 进程数 {workers})")
     print(f"输出: {output_dir}")
     print(f"配置: {output_dir / 'data.yaml'}")
 
