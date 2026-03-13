@@ -23,30 +23,41 @@ CELL_SIZE = 40
 IMG_W = IMG_H = GRID_W * CELL_SIZE  # 600
 
 
+def _norm(x: float, size: int) -> float:
+    """网格坐标归一化 [0,1]"""
+    return (x + 0.5) / size
+
+
 def _scene_to_features(scene: dict) -> dict[int, dict]:
-    """从 scene 提取每蛇的 (head_x, head_y, food_x, food_y, x2_x, x2_y, has_x2) 归一化"""
+    """从 scene 提取每蛇特征，与 train_behavior 保持一致"""
     out: dict[int, dict] = {}
     snakes = scene.get("snakes", [])
     for si, s in enumerate(snakes):
         body = s.get("body", [])
         food = s.get("food", [0, 0])
         x2 = s.get("x2")
+        score = s.get("score", 0)
+        x2_active = s.get("x2_active", False)
         if not body:
             continue
         hx, hy = body[0][0] % GRID_W, body[0][1] % GRID_H
-        xc = (hx + 0.5) / GRID_W
-        yc = (hy + 0.5) / GRID_H
-        fx = (int(food[0]) % GRID_W + 0.5) / GRID_W if food else 0.0
-        fy = (int(food[1]) % GRID_H + 0.5) / GRID_H if food else 0.0
-        xx = (int(x2[0]) % GRID_W + 0.5) / GRID_W if x2 else 0.0
-        xy = (int(x2[1]) % GRID_H + 0.5) / GRID_H if x2 else 0.0
+        xc = _norm(hx, GRID_W)
+        yc = _norm(hy, GRID_H)
+        fx = _norm(int(food[0]) % GRID_W, GRID_W) if food else 0.0
+        fy = _norm(int(food[1]) % GRID_H, GRID_H) if food else 0.0
+        xx = _norm(int(x2[0]) % GRID_W, GRID_W) if x2 else 0.0
+        xy = _norm(int(x2[1]) % GRID_H, GRID_H) if x2 else 0.0
         has_x2 = 1.0 if x2 else 0.0
-        out[si] = {"xc": xc, "yc": yc, "fx": fx, "fy": fy, "xx": xx, "xy": xy, "has_x2": has_x2}
+        out[si] = {"xc": xc, "yc": yc, "fx": fx, "fy": fy, "xx": xx, "xy": xy, "has_x2": has_x2, "x2_active": x2_active, "score": score}
     return out
 
 
-def _build_seq_features(scene_features: list[dict[int, dict]]) -> dict[int, list[list[float]]]:
-    """从 scene 构建每蛇的 12 维特征序列"""
+def _build_seq_features(scene_features: list[dict[int, dict]], input_dim: int = 12) -> dict[int, list[list[float]]]:
+    """
+    从 scene 构建特征序列，与训练时格式一致。
+    input_dim=8: grid 格式 [head_x, head_y, food_x, food_y, x2_x, x2_y, x2_active, score_norm]
+    input_dim=12: track 格式 [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food]
+    """
     snake_seqs: dict[int, list[list[float]]] = {}
     num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
     for si in range(num_snakes):
@@ -59,18 +70,25 @@ def _build_seq_features(scene_features: list[dict[int, dict]]) -> dict[int, list
             fx, fy = f["fx"], f["fy"]
             xx, xy = f["xx"], f["xy"]
             has_x2 = f["has_x2"]
-            if t > 0 and si in scene_features[t - 1]:
-                prev = scene_features[t - 1][si]
-                dx = xc - prev["xc"]
-                dy = yc - prev["yc"]
+            x2_active = f.get("x2_active", False)
+            score = f.get("score", 0)
+
+            if input_dim == 8:
+                feat = [xc, yc, fx, fy, xx, xy, 1.0 if x2_active else 0.0, min(score / 24.0, 1.0)]
             else:
-                dx, dy = 0.0, 0.0
-            df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
-            dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
-            vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
-            to_food = (fx - xc) * dx + (fy - yc) * dy
-            move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food])
+                if t > 0 and si in scene_features[t - 1]:
+                    prev = scene_features[t - 1][si]
+                    dx = xc - prev["xc"]
+                    dy = yc - prev["yc"]
+                else:
+                    dx, dy = 0.0, 0.0
+                df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
+                dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
+                vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
+                to_food = (fx - xc) * dx + (fy - yc) * dy
+                move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
+                feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food]
+            seq.append(feat)
         if len(seq) >= 2:
             snake_seqs[si] = seq
     return snake_seqs
@@ -170,8 +188,9 @@ def main():
     beh_model.load_state_dict(state)
     beh_model.eval()
 
-    # 用 scene 构建序列（基于游戏状态，不依赖 YOLO）
-    snake_seqs = _build_seq_features(scene_features)
+    # 用 scene 构建序列，格式与训练时一致（根据 checkpoint 的 input_dim 选 8 维 grid 或 12 维 track）
+    print(f"行为模型 input_dim={input_dim} ({'grid' if input_dim == 8 else 'track'} 格式)")
+    snake_seqs = _build_seq_features(scene_features, input_dim)
 
     # 对每条蛇跑行为模型，取每个端点的预测
     snake_preds: dict[int, list[tuple[int, str, str, float]]] = defaultdict(list)
