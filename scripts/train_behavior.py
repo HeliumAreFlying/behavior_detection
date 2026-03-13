@@ -26,10 +26,10 @@ def _norm(x: float, size: int) -> float:
     return (x + 0.5) / size
 
 
-def load_track_sequences(path: Path, add_velocity: bool = True) -> list[tuple[list[list[float]], int, int]]:
+def load_track_sequences(path: Path, add_velocity: bool = True) -> list[tuple[list[list[float]], int, int, int]]:
     """
-    加载 track_sequences.json，返回 [(features, label_idx, reason_idx), ...]
-    features: list of [xc, yc] 或 [xc, yc, dx, dy]
+    加载 track_sequences.json，返回 [(features, label_idx, reason_idx, is_endpoint), ...]
+    is_endpoint: 1=应输出结论, 0=暂不输出（供端点检测学习）
     """
     from models.behavior_correctness import REASON_TO_IDX
 
@@ -39,7 +39,6 @@ def load_track_sequences(path: Path, add_velocity: bool = True) -> list[tuple[li
         feats = rec.get("features", [])
         if len(feats) < 2:
             continue
-        # 按 t 排序
         feats = sorted(feats, key=lambda x: x["t"])
         seq = []
         for i, f in enumerate(feats):
@@ -57,7 +56,8 @@ def load_track_sequences(path: Path, add_velocity: bool = True) -> list[tuple[li
         label_idx = 1 if label == "incorrect" else 0
         reason = rec.get("reason", "in_progress")
         reason_idx = REASON_TO_IDX.get(reason, REASON_TO_IDX["in_progress"])
-        samples.append((seq, label_idx, reason_idx))
+        is_endpoint = int(rec.get("is_endpoint", 1))  # 旧格式缺省为 1
+        samples.append((seq, label_idx, reason_idx, is_endpoint))
     return samples
 
 
@@ -112,7 +112,7 @@ def load_grid_sequences(batches_dir: Path) -> list[tuple[list[list[float]], int,
                 label_idx = 1 if ann.get("label") == "incorrect" else 0
                 reason = ann.get("reason", "in_progress")
                 reason_idx = REASON_TO_IDX.get(reason, REASON_TO_IDX["in_progress"])
-                samples.append((seq, label_idx, reason_idx))
+                samples.append((seq, label_idx, reason_idx, 1))  # grid 无端点标注，全当端点
     return samples
 
 
@@ -187,16 +187,17 @@ def main():
             return len(self.data)
 
         def __getitem__(self, i):
-            seq, label, reason = self.data[i]
-            return torch.tensor(seq, dtype=torch.float32), label, reason
+            seq, label, reason, is_ep = self.data[i]
+            return torch.tensor(seq, dtype=torch.float32), label, reason, is_ep
 
     def collate(batch):
-        seqs, labels, reasons = zip(*batch)
+        seqs, labels, reasons, is_eps = zip(*batch)
         lengths = torch.tensor([s.size(0) for s in seqs])
         padded = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=0)
         labels = torch.tensor(labels, dtype=torch.long)
         reasons = torch.tensor(reasons, dtype=torch.long)
-        return padded, lengths, labels, reasons
+        is_endpoints = torch.tensor(is_eps, dtype=torch.float32).unsqueeze(1)
+        return padded, lengths, labels, reasons, is_endpoints
 
     train_loader = DataLoader(
         SeqDataset(train_samples),
@@ -217,6 +218,7 @@ def main():
     model = BehaviorCorrectnessModel(input_dim=input_dim, hidden_dim=args.hidden).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     ce = nn.CrossEntropyLoss()
+    bce = nn.BCEWithLogitsLoss()
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -227,30 +229,39 @@ def main():
         train_loss = 0.0
         train_correct = 0
         train_total = 0
-        for x, lengths, y_label, y_reason in train_loader:
+        for x, lengths, y_label, y_reason, y_ep in train_loader:
             x, lengths = x.to(device), lengths.to(device)
             y_label, y_reason = y_label.to(device), y_reason.to(device)
+            y_ep = y_ep.to(device)
             opt.zero_grad()
-            logits_c, logits_r = model(x, lengths)
-            loss = ce(logits_c, y_label) + 0.5 * ce(logits_r, y_reason)
+            logits_c, logits_r, logits_ep = model(x, lengths)
+            loss_ep = bce(logits_ep, y_ep)
+            mask = (y_ep > 0.5).squeeze(1)
+            if mask.any():
+                loss_c = ce(logits_c[mask], y_label[mask])
+                loss_r = ce(logits_r[mask], y_reason[mask])
+                loss = loss_ep + 0.5 * (loss_c + loss_r)
+                train_correct += (logits_c[mask].argmax(1) == y_label[mask]).sum().item()
+                train_total += mask.sum().item()
+            else:
+                loss = loss_ep
             loss.backward()
             opt.step()
             train_loss += loss.item()
-            pred = logits_c.argmax(1)
-            train_correct += (pred == y_label).sum().item()
-            train_total += y_label.size(0)
 
         model.eval()
         val_correct = 0
         val_total = 0
         with torch.no_grad():
-            for x, lengths, y_label, y_reason in val_loader:
+            for x, lengths, y_label, y_reason, y_ep in val_loader:
                 x, lengths = x.to(device), lengths.to(device)
-                y_label = y_label.to(device)
-                logits_c, _ = model(x, lengths)
-                pred = logits_c.argmax(1)
-                val_correct += (pred == y_label).sum().item()
-                val_total += y_label.size(0)
+                y_label, y_ep = y_label.to(device), y_ep.to(device)
+                logits_c, _, logits_ep = model(x, lengths)
+                mask = (y_ep > 0.5).squeeze(1)
+                if mask.any():
+                    pred = logits_c[mask].argmax(1)
+                    val_correct += (pred == y_label[mask]).sum().item()
+                    val_total += mask.sum().item()
 
         val_acc = val_correct / val_total if val_total else 0
         if val_acc > best_val_acc:

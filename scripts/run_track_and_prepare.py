@@ -1,10 +1,11 @@
 """
-在渲染图像序列上运行 YOLO 检测 + 跟踪，按 episode 分组，输出每蛇时序特征与行为标签。
-仅依赖 dataset（含 metadata.json、train/val 的 images/labels/behavior），无需 batches。
+从 dataset 生成行为序列，供 LSTM 训练。两种模式:
+  1. --from-labels: 直接从 label 文件读取蛇头坐标，无需 YOLO
+  2. 默认: 运行 YOLO 跟踪，从检测结果提取序列（需 --model）
 
-依赖: pip install ultralytics
 用法:
-  python scripts/run_track_and_prepare.py --model runs/detect/train/weights/best.pt --dataset dataset --output sequences
+  python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
+  python scripts/run_track_and_prepare.py -m yolov8n.pt -d dataset -o sequences
 """
 
 import json
@@ -87,19 +88,38 @@ def extract_head_features_per_frame(
     return dict(snake_seqs)
 
 
+def extract_sequences_from_labels(
+    entries: list[dict], dataset_dir: Path
+) -> dict[int, list[dict]]:
+    """
+    从 label 文件直接读取蛇头坐标，按帧构建每条蛇的序列。
+    返回: snake_idx -> [{"xc": f, "yc": f, "t": int}, ...]
+    """
+    snake_seqs: dict[int, list[dict]] = defaultdict(list)
+    for t, e in enumerate(entries):
+        lbl_path = dataset_dir / e["split"] / "labels" / f"{e['id']}.txt"
+        heads = _gt_heads_from_labels(lbl_path)
+        for si, (xc, yc) in enumerate(heads):
+            snake_seqs[si].append({"xc": xc, "yc": yc, "t": t})
+    return dict(snake_seqs)
+
+
 def main():
     import argparse
 
-    p = argparse.ArgumentParser(description="YOLO 跟踪 + 序列准备")
-    p.add_argument("--model", "-m", required=True, help="YOLO 权重路径，如 runs/detect/train/weights/best.pt")
+    p = argparse.ArgumentParser(description="从 dataset 生成行为序列")
+    p.add_argument("--from-labels", action="store_true",
+                   help="直接从 label 读取蛇头坐标，无需 YOLO 模型")
+    p.add_argument("--model", "-m", default="", help="YOLO 权重（非 from-labels 时必填）")
     p.add_argument("--dataset", "-d", default="dataset",
-                   help="数据集根目录（含 train/val/images, metadata.json），可写绝对或相对路径")
+                   help="数据集根目录（含 train/val/labels/behavior, metadata.json）")
     p.add_argument("--output", "-o", default="sequences", help="输出目录")
     p.add_argument("--max-episodes", type=int, default=0, help="最多处理多少 episode，0 表示全部")
-    p.add_argument("--device", default="", help="cuda:0 / cpu，默认自动")
+    p.add_argument("--device", default="", help="cuda:0 / cpu（仅 YOLO 模式）")
     args = p.parse_args()
 
-    from ultralytics import YOLO
+    if not args.from_labels and not args.model:
+        p.error("请指定 --from-labels 或 --model")
 
     dataset_dir = Path(args.dataset)
     if not dataset_dir.is_absolute() and not dataset_dir.exists():
@@ -121,70 +141,73 @@ def main():
     for key in by_episode:
         by_episode[key].sort(key=lambda x: x["scene"])
 
-    model = YOLO(args.model)
-    device = args.device or ("cuda:0" if __import__("torch").cuda.is_available() else "cpu")
-
     episode_keys = sorted(by_episode.keys())
     if args.max_episodes > 0:
         episode_keys = episode_keys[: args.max_episodes]
 
+    if not args.from_labels:
+        from ultralytics import YOLO
+        model = YOLO(args.model)
+        device = args.device or ("cuda:0" if __import__("torch").cuda.is_available() else "cpu")
+
     all_sequences: list[dict] = []
     for ki, (batch_name, ep_idx) in enumerate(episode_keys):
         entries = by_episode[(batch_name, ep_idx)]
-        img_paths: list[Path] = []
-        for e in entries:
-            split = e["split"]
-            img_paths.append(dataset_dir / split / "images" / f"{e['id']}.png")
-        if not img_paths:
+        if not entries:
             continue
 
-        # 检查文件存在
-        missing = [p for p in img_paths if not p.exists()]
-        if missing:
-            print(f"[WARN] 跳过 {batch_name} ep{ep_idx}: 缺少 {len(missing)} 张图")
-            continue
-
-        # YOLO track，persist=True 保持跨帧 track_id；显式指定 tracker 便于多目标稳定分配 ID
-        results = model.track(
-            source=[str(p) for p in img_paths],
-            persist=True,
-            tracker="bytetrack.yaml",
-            device=device,
-            verbose=False,
-            stream=True,
-        )
-        results_list = list(results)
-
-        # 找到第一个有 track_id 的帧（首帧可能 id=None），用于 track -> snake 匹配
-        head_dets: list[tuple[int, float, float]] = []
-        match_frame_idx = -1
-        for t, res in enumerate(results_list):
-            if res is None or res.boxes is None or res.boxes.id is None:
+        if args.from_labels:
+            snake_seqs = extract_sequences_from_labels(entries, dataset_dir)
+        else:
+            img_paths = [dataset_dir / e["split"] / "images" / f"{e['id']}.png" for e in entries]
+            missing = [p for p in img_paths if not p.exists()]
+            if missing:
+                print(f"[WARN] 跳过 {batch_name} ep{ep_idx}: 缺少 {len(missing)} 张图")
                 continue
-            for i in range(len(res.boxes)):
-                if int(res.boxes.cls[i]) != CLASS_HEAD:
+            results = model.track(
+                source=[str(p) for p in img_paths],
+                persist=True,
+                tracker="bytetrack.yaml",
+                device=device,
+                verbose=False,
+                stream=True,
+            )
+            results_list = list(results)
+            head_dets: list[tuple[int, float, float]] = []
+            match_frame_idx = -1
+            for t, res in enumerate(results_list):
+                if res is None or res.boxes is None or res.boxes.id is None:
                     continue
-                tid = int(res.boxes.id[i])
-                xc, yc = float(res.boxes.xywhn[i][0]), float(res.boxes.xywhn[i][1])
-                head_dets.append((tid, xc, yc))
-            if head_dets:
-                match_frame_idx = t
-                break
+                for i in range(len(res.boxes)):
+                    if int(res.boxes.cls[i]) != CLASS_HEAD:
+                        continue
+                    tid = int(res.boxes.id[i])
+                    xc, yc = float(res.boxes.xywhn[i][0]), float(res.boxes.xywhn[i][1])
+                    head_dets.append((tid, xc, yc))
+                if head_dets:
+                    match_frame_idx = t
+                    break
+            if match_frame_idx < 0 or not head_dets:
+                continue
+            match_entry = entries[match_frame_idx]
+            lbl_path = dataset_dir / match_entry["split"] / "labels" / f"{match_entry['id']}.txt"
+            gt_heads = _gt_heads_from_labels(lbl_path)
+            if not gt_heads:
+                continue
+            track_to_snake = match_tracks_to_snakes(head_dets, gt_heads)
+            yolo_seqs = extract_head_features_per_frame(results_list, track_to_snake)
+            # 用 label 填补 YOLO 漏帧，使序列与 from-labels 一致，样本数对齐
+            label_seqs = extract_sequences_from_labels(entries, dataset_dir)
+            snake_seqs = {}
+            for si in label_seqs:
+                yolo_by_t = {f["t"]: f for f in yolo_seqs.get(si, [])}
+                merged = []
+                for f in label_seqs[si]:
+                    t = f["t"]
+                    merged.append(yolo_by_t.pop(t, f))  # 优先用 YOLO，否则用 label
+                snake_seqs[si] = merged
 
-        if match_frame_idx < 0 or not head_dets:
-            continue
-
-        # 用同一帧的 label 提供 GT 蛇头位置（归一化坐标）
-        match_entry = entries[match_frame_idx]
-        lbl_path = dataset_dir / match_entry["split"] / "labels" / f"{match_entry['id']}.txt"
-        gt_heads = _gt_heads_from_labels(lbl_path)
-        if not gt_heads:
-            continue
-
-        track_to_snake = match_tracks_to_snakes(head_dets, gt_heads)
-        snake_seqs = extract_head_features_per_frame(results_list, track_to_snake)
-
-        # 每帧的 snake_annotations 来自 behavior JSON
+        # 每帧的 snake_annotations 来自 behavior JSON；生成多样本供端点检测学习
         for snake_idx, seq in snake_seqs.items():
             if not seq:
                 continue
@@ -201,19 +224,63 @@ def main():
                 else:
                     labels_per_frame.append({"label": "correct", "reason": "in_progress"})
 
-            # 取最后一帧的 label/reason 作为整条蛇序列的标注（针对当前食物）
-            last_label = labels_per_frame[-1] if labels_per_frame else {"label": "correct", "reason": "in_progress"}
+            n_frames = len(entries)
+            endpoint_frames: list[int] = [
+                i for i in range(n_frames)
+                if i < len(labels_per_frame) and labels_per_frame[i].get("reason") != "in_progress"
+            ]
+            non_endpoint_frames: list[int] = [
+                i for i in range(n_frames)
+                if i not in set(endpoint_frames)
+            ]
 
-            rec = {
-                "batch": batch_name,
-                "episode": ep_idx,
-                "snake_idx": snake_idx,
-                "features": seq,
-                "labels_per_frame": labels_per_frame,
-                "label": last_label["label"],
-                "reason": last_label["reason"],
-            }
-            all_sequences.append(rec)
+            # 端点样本：每帧 reason!=in_progress 一条
+            for i in endpoint_frames:
+                prefix = [f for f in seq if f["t"] <= i]
+                if len(prefix) < 2:
+                    continue
+                ann = labels_per_frame[i]
+                all_sequences.append({
+                    "batch": batch_name,
+                    "episode": ep_idx,
+                    "snake_idx": snake_idx,
+                    "features": prefix,
+                    "label": ann["label"],
+                    "reason": ann["reason"],
+                    "is_endpoint": 1,
+                })
+
+            # 非端点样本：每「波」抽 1 个 in_progress 帧，让模型学「暂不输出」
+            last_end = -1
+            for i in sorted(endpoint_frames):
+                mid = (last_end + 1 + i) // 2
+                if mid > last_end and mid < i and mid in non_endpoint_frames:
+                    prefix = [f for f in seq if f["t"] <= mid]
+                    if len(prefix) >= 2:
+                        all_sequences.append({
+                            "batch": batch_name,
+                            "episode": ep_idx,
+                            "snake_idx": snake_idx,
+                            "features": prefix,
+                            "label": "correct",
+                            "reason": "in_progress",
+                            "is_endpoint": 0,
+                        })
+                last_end = i
+            if endpoint_frames:
+                mid = (last_end + 1 + n_frames) // 2
+                if mid > last_end and mid < n_frames and mid in non_endpoint_frames:
+                    prefix = [f for f in seq if f["t"] <= mid]
+                    if len(prefix) >= 2:
+                        all_sequences.append({
+                            "batch": batch_name,
+                            "episode": ep_idx,
+                            "snake_idx": snake_idx,
+                            "features": prefix,
+                            "label": "correct",
+                            "reason": "in_progress",
+                            "is_endpoint": 0,
+                        })
 
         if (ki + 1) % 50 == 0 or ki == len(episode_keys) - 1:
             print(f"已处理 {ki + 1}/{len(episode_keys)} episodes, 共 {len(all_sequences)} 条蛇序列")

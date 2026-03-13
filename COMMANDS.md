@@ -24,10 +24,14 @@ python scripts/preview_labels.py --num 100
 yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 ```
 
-## 5. YOLO 跟踪与序列准备
+## 5. 序列准备（二选一）
 
 ```bash
-python scripts/run_track_and_prepare.py --model runs/detect/train/weights/best.pt --dataset dataset --output sequences
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
+```
+
+```bash
+python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 ```
 
 ## 6. 行为模型训练（纯网格）
@@ -36,10 +40,10 @@ python scripts/run_track_and_prepare.py --model runs/detect/train/weights/best.p
 python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior --epochs 100
 ```
 
-## 7. 行为模型训练（YOLO 序列）
+## 7. 行为模型训练（序列数据）
 
 ```bash
-python scripts/run_track_and_prepare.py --model runs/detect/train/weights/best.pt --dataset dataset --output sequences
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
 ```
 
 ```bash

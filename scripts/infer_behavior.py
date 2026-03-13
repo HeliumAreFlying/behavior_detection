@@ -61,10 +61,11 @@ def main():
     correct_pred = 0
     total = 0
     with torch.no_grad():
-        for seq, label_true, reason_true in samples:
+        for item in samples:
+            seq, label_true, reason_true = item[0], item[1], item[2]
             x = torch.tensor([seq], dtype=torch.float32)
             lengths = torch.tensor([len(seq)], dtype=torch.long)
-            logits_c, logits_r = model(x, lengths)
+            logits_c, logits_r, _ = model(x, lengths)
             pred_c = logits_c.argmax(1).item()
             pred_r = logits_r.argmax(1).item()
             label_pred = "incorrect" if pred_c == 1 else "correct"
