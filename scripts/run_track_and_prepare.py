@@ -16,7 +16,49 @@ from collections import defaultdict
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-CLASS_HEAD = 0
+CLASS_HEAD, CLASS_FOOD, CLASS_X2 = 0, 2, 3
+
+
+def _parse_label_per_snake(lbl_path: Path) -> list[tuple[float, float, float, float, float, float, float]]:
+    """
+    从 label 解析每蛇的 (head_x, head_y, food_x, food_y, x2_x, x2_y, has_x2)。
+    顺序: snake_head(0), snake_body(1)..., food(2), x2(3)
+    """
+    if not lbl_path.exists():
+        return []
+    lines = lbl_path.read_text(encoding="utf-8").strip().splitlines()
+    snakes: list[tuple[float, float, float, float, float, float, float]] = []
+    i = 0
+    while i < len(lines):
+        parts = lines[i].split()
+        if len(parts) < 5:
+            i += 1
+            continue
+        cls_id = int(parts[0])
+        xc, yc = float(parts[1]), float(parts[2])
+        if cls_id == CLASS_HEAD:
+            food_x, food_y = 0.0, 0.0
+            x2_x, x2_y = 0.0, 0.0
+            has_x2 = 0.0
+            i += 1
+            while i < len(lines):
+                p = lines[i].split()
+                if len(p) < 5:
+                    i += 1
+                    continue
+                c = int(p[0])
+                if c == CLASS_HEAD:
+                    break
+                if c == CLASS_FOOD:
+                    food_x, food_y = float(p[1]), float(p[2])
+                elif c == CLASS_X2:
+                    x2_x, x2_y = float(p[1]), float(p[2])
+                    has_x2 = 1.0
+                i += 1
+            snakes.append((xc, yc, food_x, food_y, x2_x, x2_y, has_x2))
+        else:
+            i += 1
+    return snakes
 
 
 def _gt_heads_from_labels(lbl_path: Path) -> list[tuple[float, float]]:
@@ -92,15 +134,19 @@ def extract_sequences_from_labels(
     entries: list[dict], dataset_dir: Path
 ) -> dict[int, list[dict]]:
     """
-    从 label 文件直接读取蛇头坐标，按帧构建每条蛇的序列。
-    返回: snake_idx -> [{"xc": f, "yc": f, "t": int}, ...]
+    从 label 文件读取每蛇每帧特征: head, food, x2。
+    返回: snake_idx -> [{"xc", "yc", "fx", "fy", "xx", "xy", "has_x2", "t"}, ...]
     """
     snake_seqs: dict[int, list[dict]] = defaultdict(list)
     for t, e in enumerate(entries):
         lbl_path = dataset_dir / e["split"] / "labels" / f"{e['id']}.txt"
-        heads = _gt_heads_from_labels(lbl_path)
-        for si, (xc, yc) in enumerate(heads):
-            snake_seqs[si].append({"xc": xc, "yc": yc, "t": t})
+        rows = _parse_label_per_snake(lbl_path)
+        for si, (hx, hy, fx, fy, xx, xy, has_x2) in enumerate(rows):
+            snake_seqs[si].append({
+                "xc": hx, "yc": hy,
+                "fx": fx, "fy": fy, "xx": xx, "xy": xy, "has_x2": has_x2,
+                "t": t,
+            })
     return dict(snake_seqs)
 
 
@@ -196,15 +242,18 @@ def main():
                 continue
             track_to_snake = match_tracks_to_snakes(head_dets, gt_heads)
             yolo_seqs = extract_head_features_per_frame(results_list, track_to_snake)
-            # 用 label 填补 YOLO 漏帧，使序列与 from-labels 一致，样本数对齐
             label_seqs = extract_sequences_from_labels(entries, dataset_dir)
             snake_seqs = {}
             for si in label_seqs:
                 yolo_by_t = {f["t"]: f for f in yolo_seqs.get(si, [])}
                 merged = []
-                for f in label_seqs[si]:
-                    t = f["t"]
-                    merged.append(yolo_by_t.pop(t, f))  # 优先用 YOLO，否则用 label
+                for lbl in label_seqs[si]:
+                    t = lbl["t"]
+                    yolo_f = yolo_by_t.get(t)
+                    if yolo_f:
+                        merged.append({**lbl, "xc": yolo_f["xc"], "yc": yolo_f["yc"]})
+                    else:
+                        merged.append(lbl)
                 snake_seqs[si] = merged
 
         # 每帧的 snake_annotations 来自 behavior JSON；生成多样本供端点检测学习

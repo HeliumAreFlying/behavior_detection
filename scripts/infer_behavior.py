@@ -34,11 +34,12 @@ def main():
         state = ckpt["model_state"]
         input_dim = ckpt.get("input_dim", 4)
         hidden_dim = ckpt.get("hidden_dim", 64)
+        num_layers = ckpt.get("num_layers", 1)
     else:
         state = ckpt
-        input_dim, hidden_dim = 4, 64
+        input_dim, hidden_dim, num_layers = 4, 64, 1
 
-    model = BehaviorCorrectnessModel(input_dim=input_dim, hidden_dim=hidden_dim)
+    model = BehaviorCorrectnessModel(input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers)
     model.load_state_dict(state)
     model.eval()
 
