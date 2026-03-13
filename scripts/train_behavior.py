@@ -250,6 +250,10 @@ def main():
                    help="特征高斯噪声 std (0=关闭)")
     p.add_argument("--aug-multiscale", action="store_true",
                    help="多尺度时间：随机取 1/2/3 倍采样子序列")
+    p.add_argument("--patience", type=int, default=50,
+                   help="早停：验证指标连续 N 个 epoch 无提升则停止，0=禁用")
+    p.add_argument("--best-metric", choices=["reason_f1", "binary_f1", "composite"], default="reason_f1",
+                   help="best.pt 选取指标：reason_f1(7类宏平均,推荐), binary_f1, composite(两者加权)")
     args = p.parse_args()
     if args.boost_incorrect:
         args.class_weights = True
@@ -464,8 +468,11 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"最优模型选取指标: {args.best_metric}  |  早停 patience={args.patience}")
+
     best_val_f1 = 0.0
     best_epoch = 0
+    epochs_without_improve = 0
     for ep in range(args.epochs):
         model.train()
         train_loss = 0.0
@@ -498,23 +505,37 @@ def main():
 
         model.eval()
         val_preds, val_labels = [], []
+        val_reason_preds, val_reason_labels = [], []
         with torch.no_grad():
             for x, lengths, y_label, y_reason, y_ep in val_loader:
                 x, lengths = x.to(device), lengths.to(device)
-                y_label, y_ep = y_label.to(device), y_ep.to(device)
-                logits_c, _ = model(x, lengths)
+                y_label, y_reason, y_ep = y_label.to(device), y_reason.to(device), y_ep.to(device)
+                logits_c, logits_r = model(x, lengths)
                 mask = (y_ep > 0.5).squeeze(1)
                 if mask.any():
                     pred = logits_c[mask].argmax(1).cpu().numpy()
                     gt = y_label[mask].cpu().numpy()
                     val_preds.extend(pred.tolist())
                     val_labels.extend(gt.tolist())
+                    r_pred = logits_r[mask].argmax(1).cpu().numpy()
+                    r_gt = y_reason[mask].cpu().numpy()
+                    val_reason_preds.extend(r_pred.tolist())
+                    val_reason_labels.extend(r_gt.tolist())
 
-        val_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
-        scheduler.step(val_f1)
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        binary_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
+        reason_f1 = f1_score(val_reason_labels, val_reason_preds, average="macro", zero_division=0) if val_reason_preds else 0.0
+        if args.best_metric == "reason_f1":
+            select_score = reason_f1
+        elif args.best_metric == "binary_f1":
+            select_score = binary_f1
+        else:
+            select_score = 0.5 * binary_f1 + 0.5 * reason_f1
+
+        scheduler.step(select_score)
+        if select_score > best_val_f1:
+            best_val_f1 = select_score
             best_epoch = ep + 1
+            epochs_without_improve = 0
             torch.save({
                 "epoch": ep,
                 "model_state": model.state_dict(),
@@ -524,6 +545,8 @@ def main():
                 "bidirectional": not args.no_bidirectional,
                 "use_attention": not args.no_attention,
             }, out_dir / "best.pt")
+        else:
+            epochs_without_improve += 1
         torch.save({
             "epoch": ep,
             "model_state": model.state_dict(),
@@ -535,9 +558,14 @@ def main():
         }, out_dir / "last.pt")
         if (ep + 1) % 10 == 0 or ep == 0:
             print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} "
-                  f"train_acc={train_correct/train_total:.4f} val_f1={val_f1:.4f}")
+                  f"train_acc={train_correct/train_total:.4f} binary_f1={binary_f1:.4f} reason_f1={reason_f1:.4f} "
+                  f"[best={args.best_metric}]")
 
-    print(f"训练完成，最佳 val_f1={best_val_f1:.4f} (epoch {best_epoch})")
+        if args.patience > 0 and epochs_without_improve >= args.patience:
+            print(f"早停: {args.patience} epoch 无提升，停止于 epoch {ep + 1}")
+            break
+
+    print(f"训练完成，最佳 {args.best_metric}={best_val_f1:.4f} (epoch {best_epoch})")
     print(f"模型保存: {out_dir / 'best.pt'}, {out_dir / 'last.pt'}")
 
 

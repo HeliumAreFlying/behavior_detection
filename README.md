@@ -132,10 +132,10 @@ python data_generator.py -b 100 -s 100 -w 8
 |------|------|------|
 | 1 | 数据生成 | 多进程 `-w 8` 加速 |
 | 2 | 渲染导出 | 640×640，全帧不跳帧 |
-| 3 | YOLO 训练 | 可选，检测 snake_head/body, food, x2 |
+| 3 | YOLO 训练 | 可选，5 类含 snake_head_dead |
 | 4 | 序列准备 | 路径 A 纯 label / 路径 B YOLO 跟踪 |
-| 5 | 行为训练 | 双向 LSTM + 注意力，`--boost-incorrect` 提升错误检测 |
-| 6 | 评估 | 自动搜索最优 F1 阈值，输出 P/R/mAP50/mAP50-95 |
+| 5 | 行为训练 | 双向 LSTM + 注意力；`--best-metric reason_f1` 选 best；`--patience` 早停 |
+| 6 | 评估 | 自动搜索最优 F1 阈值，`--batch-size` 提速 |
 | 7 | 演示视频 | `-d dataset` 与训练帧一致；`--draw-boxes` 绘制 YOLO 框 |
 
 ```bash
@@ -155,12 +155,12 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w
 # 路径 B：YOLO 跟踪（需先完成步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（双向 LSTM + 注意力；错误检测率低时加 --boost-incorrect）
+# 5. 行为模型训练（双向 LSTM + 注意力；best 按 reason_f1 选取，50 epoch 无提升早停）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
-  --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
+  --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 1000 --patience 50
 
-# 6. 评估（默认自动搜索最优 F1 阈值）
-python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
+# 6. 评估（自动搜索最优 F1 阈值；--batch-size 256 大批量提速）
+python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json --batch-size 256
 
 # 7. 演示视频（-d dataset 保证帧与训练一致；路径 B 可加 -m YOLO权重 --draw-boxes）
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -d dataset -o demo.mp4
@@ -201,14 +201,19 @@ python scripts/run_track_and_prepare.py -m yolov8n.pt -d dataset -o sequences
 
 ### 5. 行为模型训练
 
-模型结构：**双向 LSTM + 自注意力**（可用 `--no-bidirectional --no-attention` 禁用以兼容旧版）。
+模型结构：**双向 LSTM + 自注意力**（可用 `--no-bidirectional --no-attention` 禁用以兼容旧版）。best.pt 默认按 **reason_f1**（7 类宏平均）选取，`--patience 50` 早停。
 
 ```bash
 # 纯网格（推荐先验证）
 python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior
 
-# 序列数据（错误检测率低时加 --boost-incorrect）
-python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior --boost-incorrect
+# 序列数据（--boost-incorrect 提升错误检测；--best-metric reason_f1 稳健选 best）
+python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
+  --boost-incorrect --patience 50 --epochs 1000
+
+# 可选：--best-metric binary_f1 / composite；--patience 0 禁用早停
+python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior \
+  --best-metric composite --patience 30
 
 # 禁用新结构（与旧 checkpoint 一致）
 python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --no-bidirectional --no-attention

@@ -7,7 +7,7 @@
 | `data_generator.py` | `-w 8` | - |
 | `render_and_export.py` | `-w 8` | - |
 | `run_track_and_prepare.py` | `-w 8`（from-labels 时） | - |
-| `train_behavior.py` | - | `--boost-incorrect` 一键提升错误检测率；`--no-bidirectional --no-attention` 禁用新结构 |
+| `train_behavior.py` | `--patience 50` 早停 | `--best-metric reason_f1` 稳健选 best；`--boost-incorrect`；`--no-bidirectional --no-attention` |
 | `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认自动搜索最优 F1 阈值；`--no-threshold-search` 使用固定阈值；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
 
@@ -36,12 +36,12 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w
 # 路径 B：YOLO 跟踪（需步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（--boost-incorrect 提升错误检测率）
+# 5. 行为模型训练（--best-metric reason_f1 稳健选 best；--patience 50 早停）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
-  --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
+  --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 1000 --patience 50
 
-# 6. 评估（自动搜索最优 F1 阈值）
-python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
+# 6. 评估（自动搜索最优 F1 阈值；--batch-size 256 提速）
+python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json --batch-size 256
 
 # 7. 演示视频（-d dataset 与训练一致；路径 B 加 -m 权重 --draw-boxes）
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -d dataset -o demo.mp4
@@ -94,7 +94,7 @@ python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d 
 ## 6. 行为模型训练（纯网格）
 
 ```bash
-python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior --epochs 100
+python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior --epochs 100 --patience 50
 ```
 
 ## 7. 行为模型训练（序列数据，默认双向 LSTM + 注意力）
@@ -107,12 +107,15 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior
 ```
 
-**推荐：启用类别平衡与增强**
+**推荐：启用类别平衡与增强；best 按 reason_f1 选取**
 
 ```bash
-# 错误检测率低时使用 --boost-incorrect
+# 错误检测率低时使用 --boost-incorrect；--patience 50 早停
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
-  --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02
+  --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --patience 50
+
+# --best-metric：reason_f1(默认) / binary_f1 / composite
+python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --best-metric composite
 
 # 禁用双向 LSTM / 自注意力（兼容旧 checkpoint）
 python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --no-bidirectional --no-attention
