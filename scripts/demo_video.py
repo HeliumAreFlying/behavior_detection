@@ -1,6 +1,8 @@
 """
 实战测试：将对局记录渲染为视频，YOLO+行为模型联合标注，并同时展示真值（GT）以对比准确率。
 
+注意：track 模型需与训练帧一致。推荐 -d dataset 从 metadata 读取实际导出帧。
+
 用法:
   python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -o demo.mp4
   python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c checkpoints/behavior/best.pt -o demo.mp4 --draw-boxes
@@ -108,6 +110,10 @@ def main():
     p.add_argument("--fps", type=int, default=8, help="视频帧率")
     p.add_argument("--draw-boxes", action="store_true", help="绘制 YOLO 检测框")
     p.add_argument("--label-only", action="store_true", help="仅按 correct/incorrect 判定一致，不要求 reason 相同")
+    p.add_argument("--skip-n", type=int, default=5,
+                   help="track 格式下与 render_and_export 一致的跳帧数（--dataset 未指定时生效）")
+    p.add_argument("--dataset", "-d", default="",
+                   help="dataset 目录；指定后从 metadata 读取实际导出帧，保证与训练完全一致")
     args = p.parse_args()
 
     try:
@@ -117,7 +123,7 @@ def main():
         print(f"请安装依赖: pip install pygame opencv-python\n{e}")
         sys.exit(1)
 
-    from render_and_export import render_scene
+    from render_and_export import render_scene, is_key_frame, scene_to_bboxes
     from models.behavior_correctness import BehaviorCorrectnessModel, REASON_NAMES
     from replay_ui import REASON_NAMES as REASON_ZH
 
@@ -188,9 +194,40 @@ def main():
     beh_model.load_state_dict(state)
     beh_model.eval()
 
-    # 用 scene 构建序列，格式与训练时一致（根据 checkpoint 的 input_dim 选 8 维 grid 或 12 维 track）
-    print(f"行为模型 input_dim={input_dim} ({'grid' if input_dim == 8 else 'track'} 格式)")
-    snake_seqs = _build_seq_features(scene_features, input_dim)
+    # 用 scene 构建序列，格式与训练时一致
+    # track 格式：必须与 render_and_export 帧采样一致，否则训练/推理数据分布不同
+    if input_dim == 12:
+        dataset_dir = Path(args.dataset) if args.dataset else (ROOT / "dataset")
+        if not dataset_dir.is_absolute():
+            dataset_dir = ROOT / dataset_dir
+        meta_path = dataset_dir / "metadata.json"
+        use_metadata = False
+        if meta_path.exists():
+            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            entries = [m for m in metadata if m.get("batch") == batch_path.name and m.get("episode") == args.episode]
+            entries.sort(key=lambda x: x["scene"])
+            scene_indices = [e["scene"] for e in entries]
+            if scene_indices:
+                scene_features_for_model = [_scene_to_features(scenes[i]) for i in scene_indices if i < len(scenes)]
+                print(f"行为模型 input_dim=12 (track), 从 dataset metadata 读取 {len(scene_features_for_model)} 帧")
+                use_metadata = True
+        if not use_metadata:
+            ep_reason = ep.get("reason", "")
+            skip_n = max(1, args.skip_n)
+            filtered_scenes = []
+            for sc_idx, sc in enumerate(scenes):
+                prev = scenes[sc_idx - 1] if sc_idx > 0 else None
+                is_last = sc_idx == len(scenes) - 1
+                key = is_key_frame(sc, prev, is_last, ep_reason)
+                if key or skip_n <= 1 or (sc_idx % skip_n == 0):
+                    filtered_scenes.append(_scene_to_features(sc))
+            scene_features_for_model = filtered_scenes
+            hint = " (建议 -d dataset 从 metadata 读取实际帧)" if not args.dataset else ""
+            print(f"行为模型 input_dim=12 (track), 帧采样 skip_n={skip_n}, {len(filtered_scenes)}/{len(scenes)} 帧{hint}")
+    else:
+        scene_features_for_model = scene_features
+        print(f"行为模型 input_dim=8 (grid), 全帧 {len(scene_features)} 帧")
+    snake_seqs = _build_seq_features(scene_features_for_model, input_dim)
 
     # 对每条蛇跑行为模型，取每个端点的预测
     snake_preds: dict[int, list[tuple[int, str, str, float]]] = defaultdict(list)

@@ -165,7 +165,17 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/beh
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c checkpoints/behavior/best.pt -o demo.mp4 --draw-boxes
 ```
 
-### 7. 代码调用
+### 7. 全量评估（P、R、F1、mAP）
+
+```bash
+# 从 track_sequences（推荐，与训练格式一致）
+python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
+
+# 从 batches
+python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
+```
+
+### 8. 代码调用
 
 ```python
 from data_generator import generate_dataset, run_episode

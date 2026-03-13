@@ -5,9 +5,17 @@
   1. track_sequences.json (YOLO 跟踪输出): --data sequences/track_sequences.json
   2. 纯网格 (batch JSON，无需 YOLO): --data grid --batches batches/
 
+增强选项（缓解类别不平衡、提升泛化）:
+  --class-weights    类别权重（逆频率）
+  --oversample       过采样少数类
+  --aug-multiscale   多尺度时间（随机 1/2/3 倍采样子序列）
+  --aug-frame-drop   随机丢帧概率
+  --aug-noise        特征高斯噪声 std
+
 用法:
   python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior
-  python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior
+  python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \\
+    --class-weights --oversample --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02
 """
 
 import json
@@ -178,6 +186,17 @@ def main():
                    help="track 数据不加速度特征")
     p.add_argument("--weight-decay", type=float, default=1e-4,
                    help="L2 正则，缓解过拟合")
+    # 类别不平衡与增强
+    p.add_argument("--class-weights", action="store_true",
+                   help="使用类别权重（逆频率）缓解不平衡")
+    p.add_argument("--oversample", action="store_true",
+                   help="过采样少数类，使用 WeightedRandomSampler")
+    p.add_argument("--aug-frame-drop", type=float, default=0.0,
+                   help="训练时随机丢帧概率 (0=关闭)")
+    p.add_argument("--aug-noise", type=float, default=0.0,
+                   help="特征高斯噪声 std (0=关闭)")
+    p.add_argument("--aug-multiscale", action="store_true",
+                   help="多尺度时间：随机取 1/2/3 倍采样子序列")
     args = p.parse_args()
 
     random.seed(args.seed)
@@ -219,16 +238,61 @@ def main():
         print("警告: 验证集为空，请减小 --val-ratio")
         sys.exit(1)
 
+    # 类别权重：逆频率，用于 reason (7 类)
+    from models.behavior_correctness import NUM_REASONS
+    reason_counts = np.bincount([s[2] for s in train_samples if s[3] > 0.5], minlength=NUM_REASONS)
+    reason_counts = np.maximum(reason_counts, 1)
+    reason_weights = 1.0 / np.sqrt(reason_counts)
+    reason_weights = reason_weights / reason_weights.sum() * NUM_REASONS
+    label_counts = np.bincount([s[1] for s in train_samples if s[3] > 0.5], minlength=2)
+    label_counts = np.maximum(label_counts, 1)
+    label_weights = 1.0 / np.sqrt(label_counts)
+    label_weights = label_weights / label_weights.sum() * 2
+    if args.class_weights:
+        print(f"类别权重: label={label_weights.tolist()}, reason(前3)={reason_weights[:3].tolist()}...")
+
+    # 过采样：按 reason 逆频率赋权，少数类被采样更多
+    def _sample_weights(data):
+        reason_ct = np.bincount([s[2] for s in data if s[3] > 0.5], minlength=NUM_REASONS)
+        reason_ct = np.maximum(reason_ct, 1)
+        inv = 1.0 / np.sqrt(reason_ct)
+        return [inv[s[2]] if s[3] > 0.5 else inv.mean() for s in data]
+
     class SeqDataset(Dataset):
-        def __init__(self, data):
+        def __init__(self, data, augment=False):
             self.data = data
+            self.augment = augment
 
         def __len__(self):
             return len(self.data)
 
+        def _augment_seq(self, seq):
+            """多尺度+丢帧+噪声"""
+            arr = np.array(seq, dtype=np.float32)
+            n = len(arr)
+            if n < 3:
+                return arr
+            if self.augment and args.aug_multiscale and np.random.rand() < 0.5:
+                step = np.random.choice([1, 2, 3])
+                idx = np.arange(0, n, step)
+                if idx[-1] != n - 1:
+                    idx = np.concatenate([idx, [n - 1]])
+                arr = arr[idx]
+            if self.augment and args.aug_frame_drop > 0:
+                keep = np.ones(len(arr), dtype=bool)
+                keep[0] = keep[-1] = True
+                for i in range(1, len(arr) - 1):
+                    if np.random.rand() < args.aug_frame_drop:
+                        keep[i] = False
+                arr = arr[keep]
+            if self.augment and args.aug_noise > 0:
+                arr = arr + np.random.randn(*arr.shape).astype(np.float32) * args.aug_noise
+            return arr
+
         def __getitem__(self, i):
             seq, label, reason, is_ep = self.data[i]
-            return torch.tensor(seq, dtype=torch.float32), label, reason, is_ep
+            arr = self._augment_seq(seq)
+            return torch.tensor(arr, dtype=torch.float32), label, reason, is_ep
 
     def collate(batch):
         seqs, labels, reasons, is_eps = zip(*batch)
@@ -239,15 +303,21 @@ def main():
         is_endpoints = torch.tensor(is_eps, dtype=torch.float32).unsqueeze(1)
         return padded, lengths, labels, reasons, is_endpoints
 
+    train_ds = SeqDataset(train_samples, augment=True)
+    sampler = None
+    if args.oversample:
+        sw = _sample_weights(train_samples)
+        sampler = torch.utils.data.WeightedRandomSampler(sw, len(sw))
     train_loader = DataLoader(
-        SeqDataset(train_samples),
+        train_ds,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         collate_fn=collate,
         num_workers=0,
     )
     val_loader = DataLoader(
-        SeqDataset(val_samples),
+        SeqDataset(val_samples, augment=False),
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate,
@@ -263,7 +333,14 @@ def main():
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=25, verbose=True)
-    ce = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+    ce_kw = {"label_smoothing": args.label_smoothing}
+    if args.class_weights:
+        ce_kw["weight"] = torch.tensor(label_weights, dtype=torch.float32).to(device)
+    ce_label = nn.CrossEntropyLoss(**ce_kw)
+    ce_kw_reason = {"label_smoothing": args.label_smoothing}
+    if args.class_weights:
+        ce_kw_reason["weight"] = torch.tensor(reason_weights, dtype=torch.float32).to(device)
+    ce_reason = nn.CrossEntropyLoss(**ce_kw_reason)
     bce = nn.BCEWithLogitsLoss()
 
     out_dir = Path(args.output)
@@ -290,8 +367,8 @@ def main():
             loss_ep = bce(logits_ep, y_ep) if logits_ep is not None else x.new_zeros(1)
             mask = (y_ep > 0.5).squeeze(1)
             if mask.any():
-                loss_c = ce(logits_c[mask], y_label[mask])
-                loss_r = ce(logits_r[mask], y_reason[mask])
+                loss_c = ce_label(logits_c[mask], y_label[mask])
+                loss_r = ce_reason(logits_r[mask], y_reason[mask])
                 loss = loss_ep + 0.5 * (loss_c + loss_r)
                 train_correct += (logits_c[mask].argmax(1) == y_label[mask]).sum().item()
                 train_total += mask.sum().item()
