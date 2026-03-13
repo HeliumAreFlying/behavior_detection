@@ -296,7 +296,7 @@ def main():
             prob_incorrect_list.append(float(prob_c[1]))
             pred_reason_probs.append(torch.softmax(logits_r, dim=1).cpu().numpy()[0])
 
-    # 计算指标：P, R, mAP50, mAP50-95
+    # 计算指标：P, R, mAP50, mAP50-95（格式与 YOLO val 一致）
     try:
         from sklearn.metrics import precision_recall_fscore_support, average_precision_score
         from sklearn.preprocessing import label_binarize
@@ -308,29 +308,38 @@ def main():
     pred_labels = np.array(pred_labels)
     prob_incorrect = np.array(prob_incorrect_list)
     pred_probs = np.array(pred_reason_probs)
-
-    # P, R：incorrect 类（正类）
-    p_l, r_l, _, _ = precision_recall_fscore_support(
-        gt_labels, pred_labels, labels=[0, 1], average=None, zero_division=0
-    )
-    p_inc, r_inc = p_l[1], r_l[1]
-
-    # mAP50：incorrect 的 AP（P(incorrect) 为 score）
-    ap50 = average_precision_score(gt_labels, prob_incorrect) if gt_labels.sum() > 0 else 0.0
-
-    # mAP50-95：7 类 reason 的 mAP（各类 AP 均值）
     gt_reasons_arr = np.array(gt_reasons)
     n_reasons = len(REASON_NAMES)
     y_bin = label_binarize(gt_reasons_arr, classes=range(n_reasons))
+
+    pred_reasons_arr = np.array(pred_reasons)
+    # 每类 P, R, mAP50, mAP50-95
+    p_per, r_per, _, support = precision_recall_fscore_support(
+        gt_reasons_arr, pred_reasons_arr, labels=range(n_reasons),
+        average=None, zero_division=0
+    )
     ap_per_class = []
     for c in range(n_reasons):
         if y_bin[:, c].sum() == 0:
-            continue
-        ap = average_precision_score(y_bin[:, c], pred_probs[:, c])
-        ap_per_class.append(ap)
-    map50_95 = np.mean(ap_per_class) if ap_per_class else 0.0
+            ap_per_class.append(0.0)
+        else:
+            ap = average_precision_score(y_bin[:, c], pred_probs[:, c])
+            ap_per_class.append(ap)
 
-    print(f"\nP: {p_inc:.4f}  R: {r_inc:.4f}  mAP50: {ap50:.4f}  mAP50-95: {map50_95:.4f}")
+    # 整体 = 7 类 reason 的宏平均（与 YOLO all 一致）
+    p_all = float(np.mean(p_per))
+    r_all = float(np.mean(r_per))
+    ap50_all = float(np.mean(ap_per_class)) if ap_per_class else 0.0
+    map50_95_all = ap50_all
+
+    # 打印：表头在第一行，与 YOLO 一致
+    print("\n" + f"{'Class':<22}  {'P':>10}  {'R':>10}  {'mAP50':>10}  {'mAP50-95':>10}")
+    print("-" * 68)
+    print(f"{'all':<22}  {p_all:>10.4f}  {r_all:>10.4f}  {ap50_all:>10.4f}  {map50_95_all:>10.4f}")
+    for c in range(n_reasons):
+        name = REASON_NAMES[c][:20]
+        ap50 = ap_per_class[c] if c < len(ap_per_class) else 0.0
+        print(f"{name:<22}  {p_per[c]:>10.4f}  {r_per[c]:>10.4f}  {ap50:>10.4f}  {ap50:>10.4f}")
 
 
 if __name__ == "__main__":
