@@ -240,6 +240,9 @@ python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --r
 
 # 从 batches
 python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
+
+# 大批量评估提速：--batch-size 256（显存允许时）
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --batch-size 256
 ```
 
 ### 8. 代码调用

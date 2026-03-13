@@ -220,6 +220,8 @@ def main():
                    help="不自动搜索阈值，使用 --incorrect-threshold 指定值")
     p.add_argument("--reason-override", action="store_true",
                    help="若预测 reason 为错误类(self_collision/snake_collision/x2_wasted/timeout)，强制 label=incorrect")
+    p.add_argument("--batch-size", type=int, default=128,
+                   help="推理批次大小，增大可提速（显存允许时）")
     args = p.parse_args()
 
     model_path = Path(args.model)
@@ -249,6 +251,8 @@ def main():
     )
     model.load_state_dict(state)
     model.eval()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
 
     if args.batches:
         batches_dir = Path(args.batches)
@@ -309,20 +313,32 @@ def main():
             out.append(merged)
         return out
 
-    # 推理
+    # 批量化推理
     INCORRECT_REASON_IDX = {3, 4, 5, 6}  # self_collision, snake_collision, x2_wasted, timeout
     if half > 0:
         seqs = _merge_frame_context(seqs)
     pred_reasons, prob_incorrect_list, pred_reason_probs = [], [], []
-    with torch.no_grad():
-        for seq in seqs:
-            x = torch.tensor([seq], dtype=torch.float32)
-            logits_c, logits_r = model(x, None)
-            prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()[0]
-            pred_r = logits_r.argmax(1).item()
-            pred_reasons.append(pred_r)
-            prob_incorrect_list.append(float(prob_c[1]))
-            pred_reason_probs.append(torch.softmax(logits_r, dim=1).cpu().numpy()[0])
+    batch_size = args.batch_size
+    n = len(seqs)
+    with torch.inference_mode():
+        for start in range(0, n, batch_size):
+            batch_seqs = seqs[start : start + batch_size]
+            lengths = torch.tensor([len(s) for s in batch_seqs], dtype=torch.long)
+            padded = torch.nn.utils.rnn.pad_sequence(
+                [torch.tensor(s, dtype=torch.float32) for s in batch_seqs],
+                batch_first=True,
+                padding_value=0.0,
+            )
+            x = padded.to(device)
+            lengths = lengths.to(device)
+            logits_c, logits_r = model(x, lengths)
+            prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()
+            pred_r = logits_r.argmax(1).cpu().numpy()
+            prob_r = torch.softmax(logits_r, dim=1).cpu().numpy()
+            for i in range(len(batch_seqs)):
+                pred_reasons.append(int(pred_r[i]))
+                prob_incorrect_list.append(float(prob_c[i, 1]))
+                pred_reason_probs.append(prob_r[i])
 
     # 计算指标：P, R, mAP50, mAP50-95（格式与 YOLO val 一致）
     try:

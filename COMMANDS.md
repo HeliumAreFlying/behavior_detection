@@ -8,7 +8,7 @@
 | `render_and_export.py` | `-w 8` | - |
 | `run_track_and_prepare.py` | `-w 8`（from-labels 时） | - |
 | `train_behavior.py` | - | `--boost-incorrect` 一键提升错误检测率；`--no-bidirectional --no-attention` 禁用新结构 |
-| `eval_behavior.py` | - | 默认自动搜索最优 F1 阈值；`--no-threshold-search` 使用固定阈值；`--reason-override` |
+| `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认自动搜索最优 F1 阈值；`--no-threshold-search` 使用固定阈值；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
 
 > Ctrl+C 可安全中断多进程脚本，不会卡死。
@@ -165,4 +165,7 @@ python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --r
 
 # 从 batches 评估（需 dataset metadata）
 python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
+
+# 大批量推理提速（默认 128，显存允许可增大）
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --batch-size 256
 ```
