@@ -28,13 +28,8 @@ IMG_H = GRID_H * CELL_SIZE
 BG = (28, 28, 32)
 GRID_LINE = (48, 48, 56)
 
-# YOLO 类别: 0-2 蛇头, 3-5 蛇身, 6-8 食物, 9-11 x2
-CLASS_NAMES = [
-    "snake_head_green", "snake_head_blue", "snake_head_orange",
-    "snake_body_green", "snake_body_blue", "snake_body_orange",
-    "food_green", "food_blue", "food_orange",
-    "x2_green", "x2_blue", "x2_orange",
-]
+# YOLO 类别: 不区分颜色，由跟踪 (ByteTrack) 区分不同目标
+CLASS_NAMES = ["snake_head", "snake_body", "food", "x2"]
 
 
 def grid_to_yolo(gx: int, gy: int) -> tuple[float, float, float, float]:
@@ -55,28 +50,31 @@ def scene_to_bboxes(scene: dict) -> list[tuple[int, float, float, float, float]]
         return lines
 
     for s in snakes_data:
-        cid = s.get("color_id", 0) % 3
         body = s.get("body", [])
         food = s.get("food", [0, 0])
         x2 = s.get("x2")
 
-        for i, (gx, gy) in enumerate(body):
-            gx, gy = int(gx), int(gy)
+        for i, pos in enumerate(body):
+            try:
+                gx, gy = int(pos[0]), int(pos[1])
+            except (IndexError, TypeError):
+                continue
+            gx = ((gx % GRID_W) + GRID_W) % GRID_W
+            gy = ((gy % GRID_H) + GRID_H) % GRID_H
             xc, yc, w, h = grid_to_yolo(gx, gy)
-            if i == 0:
-                cls = cid  # snake_head
-            else:
-                cls = 3 + cid  # snake_body
+            cls = 0 if i == 0 else 1  # snake_head / snake_body
             lines.append((cls, xc, yc, w, h))
 
         if food:
-            fx, fy = int(food[0]), int(food[1])
+            fx = ((int(food[0]) % GRID_W) + GRID_W) % GRID_W
+            fy = ((int(food[1]) % GRID_H) + GRID_H) % GRID_H
             xc, yc, w, h = grid_to_yolo(fx, fy)
-            lines.append((6 + cid, xc, yc, w, h))
+            lines.append((2, xc, yc, w, h))  # food
         if x2:
-            xx, xy = int(x2[0]), int(x2[1])
+            xx = ((int(x2[0]) % GRID_W) + GRID_W) % GRID_W
+            xy = ((int(x2[1]) % GRID_H) + GRID_H) % GRID_H
             xc, yc, w, h = grid_to_yolo(xx, xy)
-            lines.append((9 + cid, xc, yc, w, h))
+            lines.append((3, xc, yc, w, h))  # x2
 
     return lines
 
@@ -118,15 +116,21 @@ def render_scene(scene: dict) -> "pygame.Surface":
             except Exception:
                 pass
 
-    # 蛇身
+    # 蛇身（蛇头用深色 x2，蛇身用 body）
     for s in snakes_data:
         body = s.get("body", [])
         cid = s.get("color_id", 0) % len(SNAKE_COLORS)
-        body_color = SNAKE_COLORS[cid]["body"]
-        for sx, sy in body:
-            sx, sy = sx % GRID_W, sy % GRID_H
+        colors = SNAKE_COLORS[cid]
+        for i, pos in enumerate(body):
+            try:
+                sx, sy = int(pos[0]), int(pos[1])
+            except (IndexError, TypeError):
+                continue
+            sx = ((sx % GRID_W) + GRID_W) % GRID_W
+            sy = ((sy % GRID_H) + GRID_H) % GRID_H
             rect = (sx * CELL_SIZE + 1, sy * CELL_SIZE + 1, CELL_SIZE - 2, CELL_SIZE - 2)
-            pygame.draw.rect(screen, body_color, rect, border_radius=3)
+            seg_color = colors["x2"] if i == 0 else colors["body"]
+            pygame.draw.rect(screen, seg_color, rect, border_radius=3)
 
     return screen
 
@@ -175,9 +179,11 @@ def main():
 
     train_img = output_dir / "train" / "images"
     train_lbl = output_dir / "train" / "labels"
+    train_beh = output_dir / "train" / "behavior"
     val_img = output_dir / "val" / "images"
     val_lbl = output_dir / "val" / "labels"
-    for d in (train_img, train_lbl, val_img, val_lbl):
+    val_beh = output_dir / "val" / "behavior"
+    for d in (train_img, train_lbl, train_beh, val_img, val_lbl, val_beh):
         d.mkdir(parents=True, exist_ok=True)
 
     pygame.init()
@@ -212,9 +218,11 @@ def main():
         split = "val" if i in val_idx else "train"
         img_dir = output_dir / split / "images"
         lbl_dir = output_dir / split / "labels"
+        beh_dir = output_dir / split / "behavior"
         name = f"{global_idx:06d}"
         img_path = img_dir / f"{name}.png"
         lbl_path = lbl_dir / f"{name}.txt"
+        beh_path = beh_dir / f"{name}.json"
 
         surf = render_scene(scene)
         pygame.image.save(surf, img_path)
@@ -222,6 +230,11 @@ def main():
         bboxes = scene_to_bboxes(scene)
         lbl_lines = [f"{c} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}" for c, xc, yc, w, h in bboxes]
         lbl_path.write_text("\n".join(lbl_lines), encoding="utf-8")
+
+        # 行为正确性标签：每蛇的 label + reason（针对当前食物）
+        snake_ann = scene.get("snake_annotations", [])
+        beh_data = {"snake_annotations": snake_ann}
+        beh_path.write_text(json.dumps(beh_data, ensure_ascii=False), encoding="utf-8")
 
         global_idx += 1
         if global_idx % 500 == 0:

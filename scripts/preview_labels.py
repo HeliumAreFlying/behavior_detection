@@ -1,29 +1,37 @@
 """
-在 images 上绘制 YOLO 标注，生成预览图
+在 images 上绘制 YOLO 标注 + 行为正确性标签
 输出 preview/ 下 100 张带框图像，便于检查标注
 """
 
+import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# 类别名（与 render_and_export 一致）
-CLASS_NAMES = [
-    "snake_head_green", "snake_head_blue", "snake_head_orange",
-    "snake_body_green", "snake_body_blue", "snake_body_orange",
-    "food_green", "food_blue", "food_orange",
-    "x2_green", "x2_blue", "x2_orange",
+# 类别名（与 render_and_export 一致，不区分颜色）
+CLASS_NAMES = ["snake_head", "snake_body", "food", "x2"]
+
+# 框颜色 (R,G,B)：蛇头用深色、蛇身用浅色，与渲染一致
+BOX_COLORS = [
+    (46, 125, 50), (76, 175, 80),   # snake_head(深绿), snake_body(浅绿)
+    (255, 183, 77), (255, 193, 7),  # food, x2
 ]
 
-# 框颜色 (R,G,B)，按类别区分
-BOX_COLORS = [
-    (76, 175, 80), (33, 150, 243), (255, 152, 0),   # 蛇头 绿蓝橙
-    (56, 142, 60), (25, 118, 210), (230, 81, 0),    # 蛇身
-    (129, 199, 132), (100, 181, 246), (255, 183, 77),  # 食物
-    (46, 125, 50), (13, 71, 161), (230, 81, 0),     # x2
-]
+# 行为标签颜色
+REASON_NAMES = {
+    "ate_x2_then_food": "先吃x2再吃食物(对)",
+    "ate_food_no_x2": "吃食物(对)",
+    "in_progress": "进行中",
+    "self_collision": "撞到自己(错)",
+    "snake_collision": "蛇间碰撞(错)",
+    "x2_wasted": "x2浪费(错)",
+    "timeout": "超时(错)",
+}
+# 每蛇颜色（与 game.SNAKE_COLORS body 一致）
+SNAKE_COLORS = [(76, 175, 80), (33, 150, 243), (255, 152, 0)]  # 绿蓝橙
+INCORRECT_COLOR = (244, 67, 54)  # 错误时用红色
 
 
 def yolo_to_xyxy(xc: float, yc: float, w: float, h: float, img_w: int, img_h: int) -> tuple[int, int, int, int]:
@@ -35,17 +43,32 @@ def yolo_to_xyxy(xc: float, yc: float, w: float, h: float, img_w: int, img_h: in
     return x1, y1, x2, y2
 
 
-def draw_preview(img_path: Path, lbl_path: Path, out_path: Path, img_w: int = 600, img_h: int = 600) -> None:
-    """在图像上绘制标注并保存"""
+def draw_preview(
+    img_path: Path,
+    lbl_path: Path,
+    beh_path: Path | None,
+    out_path: Path,
+    img_w: int = 600,
+    img_h: int = 600,
+) -> None:
+    """在图像上绘制 YOLO 标注 + 行为标签并保存"""
     try:
         from PIL import Image
         import PIL.ImageDraw as ImageDraw
+        import PIL.ImageFont as ImageFont
     except ImportError:
         print("请安装 Pillow: pip install Pillow")
         sys.exit(1)
 
     img = Image.open(img_path).convert("RGB")
     draw = ImageDraw.Draw(img)
+    font = ImageFont.load_default()
+    for fn in ("msyh.ttc", "simhei.ttf", "arial.ttf", "C:/Windows/Fonts/msyh.ttc"):
+        try:
+            font = ImageFont.truetype(fn, 14)
+            break
+        except Exception:
+            continue
 
     if lbl_path.exists():
         for line in lbl_path.read_text(encoding="utf-8").strip().splitlines():
@@ -60,7 +83,34 @@ def draw_preview(img_path: Path, lbl_path: Path, out_path: Path, img_w: int = 60
             color = BOX_COLORS[c % len(BOX_COLORS)]
             name = CLASS_NAMES[c] if c < len(CLASS_NAMES) else str(c)
             draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-            draw.text((x1, y1 - 12), name, fill=color)
+            text_y = max(0, y1 - 12)
+            draw.text((x1, text_y), name, fill=color, font=font)
+
+    # 绘制行为正确性标签（底部扩展面板，不覆盖游戏区）
+    if beh_path and beh_path.exists():
+        try:
+            data = json.loads(beh_path.read_text(encoding="utf-8"))
+            anns = data.get("snake_annotations", [])
+        except Exception:
+            anns = []
+        if anns:
+            line_h = 20
+            panel_h = len(anns) * line_h + 16
+            new_h = img_h + panel_h
+            out_img = Image.new("RGB", (img_w, new_h), (28, 28, 32))
+            out_img.paste(img, (0, 0))
+            draw = ImageDraw.Draw(out_img)
+            y = img_h + 8
+            for i, ann in enumerate(anns):
+                lbl = ann.get("label", "correct")
+                rsn = ann.get("reason", "in_progress")
+                rsn_zh = REASON_NAMES.get(rsn, rsn)
+                txt = f"蛇{i+1}: {'正确' if lbl == 'correct' else '错误'} - {rsn_zh}"
+                snake_color = SNAKE_COLORS[i % len(SNAKE_COLORS)]
+                color = snake_color if lbl == "correct" else INCORRECT_COLOR
+                draw.text((12, y), txt, fill=color, font=font)
+                y += line_h
+            img = out_img
 
     img.save(out_path)
     img.close()
@@ -78,6 +128,7 @@ def main():
     dataset = Path(args.dataset or ROOT / "dataset")
     img_dir = dataset / args.split / "images"
     lbl_dir = dataset / args.split / "labels"
+    beh_dir = dataset / args.split / "behavior"
     out_dir = Path(args.output or ROOT / "preview")
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -94,8 +145,9 @@ def main():
     print(f"生成 {len(images)} 张预览 -> {out_dir}")
     for i, img_path in enumerate(images):
         lbl_path = lbl_dir / (img_path.stem + ".txt")
+        beh_path = beh_dir / (img_path.stem + ".json") if beh_dir.exists() else None
         out_path = out_dir / f"preview_{i:04d}_{img_path.name}"
-        draw_preview(img_path, lbl_path, out_path)
+        draw_preview(img_path, lbl_path, beh_path, out_path)
         if (i + 1) % 20 == 0:
             print(f"  {i + 1}/{len(images)}")
 
