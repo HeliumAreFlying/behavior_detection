@@ -234,8 +234,13 @@ def main():
             y_label, y_reason = y_label.to(device), y_reason.to(device)
             y_ep = y_ep.to(device)
             opt.zero_grad()
-            logits_c, logits_r, logits_ep = model(x, lengths)
-            loss_ep = bce(logits_ep, y_ep)
+            outputs = model(x, lengths)
+            if len(outputs) == 3:
+                logits_c, logits_r, logits_ep = outputs
+            else:
+                logits_c, logits_r = outputs
+                logits_ep = None
+            loss_ep = bce(logits_ep, y_ep) if logits_ep is not None else x.new_zeros(1)
             mask = (y_ep > 0.5).squeeze(1)
             if mask.any():
                 loss_c = ce(logits_c[mask], y_label[mask])
@@ -256,7 +261,8 @@ def main():
             for x, lengths, y_label, y_reason, y_ep in val_loader:
                 x, lengths = x.to(device), lengths.to(device)
                 y_label, y_ep = y_label.to(device), y_ep.to(device)
-                logits_c, _, logits_ep = model(x, lengths)
+                outputs = model(x, lengths)
+                logits_c = outputs[0]
                 mask = (y_ep > 0.5).squeeze(1)
                 if mask.any():
                     pred = logits_c[mask].argmax(1)
