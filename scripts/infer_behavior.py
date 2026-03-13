@@ -43,9 +43,11 @@ def main():
         input_dim, hidden_dim, num_layers = 4, 64, 1
         bidirectional, use_attention = False, False
 
+    use_head_forward_embedding = ckpt.get("use_head_forward_embedding", False)
     model = BehaviorCorrectnessModel(
         input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers,
         bidirectional=bidirectional, use_attention=use_attention,
+        use_head_forward_embedding=use_head_forward_embedding,
     )
     model.load_state_dict(state)
     model.eval()
@@ -66,32 +68,28 @@ def main():
     if args.limit > 0:
         samples = samples[: args.limit]
 
-    base_dim = 16
-    if input_dim in (14, 28, 42) or (input_dim >= 14 and input_dim % 14 == 0 and input_dim % 16 != 0):
-        base_dim = 14
-    frame_ctx = input_dim // base_dim if input_dim >= base_dim and input_dim % base_dim == 0 else 1
+    base_cont_dim = 17 if use_head_forward_embedding else 16
+    frame_ctx = input_dim // base_cont_dim if input_dim >= base_cont_dim and input_dim % base_cont_dim == 0 else 1
     half = frame_ctx // 2
 
-    def _merge(seq, bd, h):
+    def _merge_cont(seq, bd, h):
         if h <= 0:
             return seq
         n = len(seq)
         return [sum((seq[max(0, min(n - 1, i + j))] for j in range(-h, h + 1)), []) for i in range(n)]
-
-    if base_dim == 14 and samples and len(samples[0][0][0]) > 14:
-        samples = [([f[:14] for f in s[0]],) + s[1:] for s in samples]
-    if half > 0:
-        samples = [(_merge(s[0], base_dim, half),) + tuple(s[1:]) for s in samples]
 
     thresh = args.incorrect_threshold
     correct_pred = 0
     total = 0
     with torch.no_grad():
         for item in samples:
-            seq, label_true, reason_true = item[0], item[1], item[2]
-            x = torch.tensor([seq], dtype=torch.float32)
-            lengths = torch.tensor([len(seq)], dtype=torch.long)
-            logits_c, logits_r = model(x, lengths)
+            (seq_cont, seq_hf), label_true, reason_true = item[0], item[1], item[2]
+            if half > 0:
+                seq_cont = _merge_cont(seq_cont, base_cont_dim, half)
+            x = torch.tensor([seq_cont], dtype=torch.float32)
+            x_hf = torch.tensor([seq_hf], dtype=torch.long) if use_head_forward_embedding else None
+            lengths = torch.tensor([len(seq_cont)], dtype=torch.long)
+            logits_c, logits_r = model(x, lengths, x_head_forward=x_hf)
             prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()[0]
             pred_c = 1 if prob_c[1] >= thresh else 0
             pred_r = logits_r.argmax(1).item()

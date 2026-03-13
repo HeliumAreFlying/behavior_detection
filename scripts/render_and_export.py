@@ -39,6 +39,54 @@ CLASS_NAMES = ["snake_head", "snake_body", "food", "x2", "snake_head_dead"]
 CLASS_HEAD, CLASS_HEAD_DEAD = 0, 4
 
 
+def _head_forward_type_from_scene(scene: dict) -> list[int]:
+    """
+    蛇头前方格子类型: 0=空, 1=自己身体, 2=其他蛇。
+    用于区分 self_collision / snake_collision。
+    """
+    snakes_data = scene.get("snakes", [])
+    if not snakes_data:
+        return []
+    result = []
+    for si, s in enumerate(snakes_data):
+        body = s.get("body", [])
+        if not body:
+            result.append(0)
+            continue
+        try:
+            hx, hy = int(body[0][0]), int(body[0][1])
+        except (IndexError, TypeError):
+            result.append(0)
+            continue
+        if len(body) >= 2:
+            dx = int(body[0][0]) - int(body[1][0])
+            dy = int(body[0][1]) - int(body[1][1])
+        else:
+            dx, dy = 1, 0
+        fx = ((hx + dx) % GRID_W + GRID_W) % GRID_W
+        fy = ((hy + dy) % GRID_H + GRID_H) % GRID_H
+        own_cells = {((int(p[0]) % GRID_W + GRID_W) % GRID_W, (int(p[1]) % GRID_H + GRID_H) % GRID_H) for p in body}
+        other_cells = set()
+        for sj, s2 in enumerate(snakes_data):
+            if sj == si:
+                continue
+            for p in s2.get("body", []):
+                try:
+                    gx = (int(p[0]) % GRID_W + GRID_W) % GRID_W
+                    gy = (int(p[1]) % GRID_H + GRID_H) % GRID_H
+                    other_cells.add((gx, gy))
+                except (IndexError, TypeError):
+                    pass
+        fwd = (fx, fy)
+        if fwd in own_cells:
+            result.append(1)
+        elif fwd in other_cells:
+            result.append(2)
+        else:
+            result.append(0)
+    return result
+
+
 def grid_to_yolo(gx: int, gy: int) -> tuple[float, float, float, float]:
     """网格坐标转 YOLO 归一化 (x_center, y_center, w, h)"""
     gx, gy = gx % GRID_W, gy % GRID_H
@@ -251,7 +299,8 @@ def _process_one_item(item: tuple) -> dict:
     Path(lbl_path).write_text("\n".join(lbl_lines), encoding="utf-8")
 
     snake_ann = scene.get("snake_annotations", [])
-    beh_data = {"snake_annotations": snake_ann}
+    head_forward_type = _head_forward_type_from_scene(scene)
+    beh_data = {"snake_annotations": snake_ann, "head_forward_type": head_forward_type}
     Path(beh_path).write_text(json.dumps(beh_data, ensure_ascii=False), encoding="utf-8")
 
     return metadata

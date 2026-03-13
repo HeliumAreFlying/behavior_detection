@@ -24,6 +24,50 @@ GRID_W = GRID_H = 15
 IMG_W = IMG_H = 640
 
 
+def _head_forward_type_from_scene(scene: dict) -> list[int]:
+    """蛇头前方格子: 0=空, 1=自己身体, 2=其他蛇"""
+    snakes_data = scene.get("snakes", [])
+    if not snakes_data:
+        return []
+    result = []
+    for si, s in enumerate(snakes_data):
+        body = s.get("body", [])
+        if not body:
+            result.append(0)
+            continue
+        try:
+            hx, hy = int(body[0][0]), int(body[0][1])
+        except (IndexError, TypeError):
+            result.append(0)
+            continue
+        dx, dy = (1, 0)
+        if len(body) >= 2:
+            dx = int(body[0][0]) - int(body[1][0])
+            dy = int(body[0][1]) - int(body[1][1])
+        fx = ((hx + dx) % GRID_W + GRID_W) % GRID_W
+        fy = ((hy + dy) % GRID_H + GRID_H) % GRID_H
+        own_cells = {((int(p[0]) % GRID_W + GRID_W) % GRID_W, (int(p[1]) % GRID_H + GRID_H) % GRID_H) for p in body}
+        other_cells = set()
+        for sj, s2 in enumerate(snakes_data):
+            if sj == si:
+                continue
+            for p in s2.get("body", []):
+                try:
+                    gx = (int(p[0]) % GRID_W + GRID_W) % GRID_W
+                    gy = (int(p[1]) % GRID_H + GRID_H) % GRID_H
+                    other_cells.add((gx, gy))
+                except (IndexError, TypeError):
+                    pass
+        fwd = (fx, fy)
+        if fwd in own_cells:
+            result.append(1)
+        elif fwd in other_cells:
+            result.append(2)
+        else:
+            result.append(0)
+    return result
+
+
 def _norm(x: float, size: int) -> float:
     """网格坐标归一化 [0,1]"""
     return (x + 0.5) / size
@@ -72,17 +116,20 @@ def _infer_ate_from_scene(prev: dict | None, curr: dict) -> tuple[float, float]:
 
 
 def _build_seq_features(
-    scene_features: list[dict[int, dict]], input_dim: int = 16, last_frame_reasons: dict[int, str] | None = None
-) -> dict[int, list[list[float]]]:
-    """构建 16 维特征（与 YOLO 路径一致），含 is_dead、steps_since_food。"""
-    snake_seqs: dict[int, list[list[float]]] = {}
+    scene_features: list[dict[int, dict]],
+    scenes: list[dict] | None,
+    input_dim: int = 17,
+    last_frame_reasons: dict[int, str] | None = None,
+) -> dict[int, tuple[list[list[float]], list[int]]]:
+    """构建 17 维 cont + head_forward。"""
+    snake_seqs: dict[int, tuple[list[list[float]], list[int]]] = {}
     num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
     last_t_per_snake: dict[int, int] = {}
     for t, sf in enumerate(scene_features):
         for si in sf:
             last_t_per_snake[si] = t
     for si in range(num_snakes):
-        seq = []
+        seq_cont, seq_hf = [], []
         steps_counter = 0
         is_dead_last = 0.0
         if last_frame_reasons and si in last_frame_reasons:
@@ -94,11 +141,16 @@ def _build_seq_features(
                 continue
             f = sf[si]
             xc, yc = f["xc"], f["yc"]
-            fx, fy = f["fx"], f["fy"]
-            xx, xy = f["xx"], f["xy"]
+            fx, fy, xx, xy = f["fx"], f["fy"], f["xx"], f["xy"]
             has_x2 = f["has_x2"]
             prev_f = scene_features[t - 1][si] if t > 0 and si in scene_features[t - 1] else None
             ate_food, ate_x2 = _infer_ate_from_scene(prev_f, f)
+            ate_food_while_x2 = 1.0 if (ate_food and has_x2) else 0.0
+            head_forward = 0
+            if scenes and t < len(scenes):
+                hf_list = _head_forward_type_from_scene(scenes[t])
+                head_forward = int(hf_list[si]) if si < len(hf_list) else 0
+                head_forward = max(0, min(2, head_forward))
             if ate_food:
                 steps_counter = 0
             else:
@@ -115,10 +167,11 @@ def _build_seq_features(
             vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
             to_food = (fx - xc) * dx + (fy - yc) * dy
             move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-            feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food]
-            seq.append(feat)
-        if len(seq) >= 2:
-            snake_seqs[si] = seq
+            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]
+            seq_cont.append(cont)
+            seq_hf.append(head_forward)
+        if len(seq_cont) >= 2:
+            snake_seqs[si] = (seq_cont, seq_hf)
     return snake_seqs
 
 
@@ -217,21 +270,23 @@ def main():
     else:
         state, input_dim, hidden_dim, num_layers = ckpt, 12, 128, 2
         bidirectional, use_attention = False, False
+    use_head_forward_embedding = ckpt.get("use_head_forward_embedding", False) if isinstance(ckpt, dict) else False
 
     beh_model = BehaviorCorrectnessModel(
         input_dim=input_dim, hidden_dim=hidden_dim, num_layers=num_layers,
         bidirectional=bidirectional, use_attention=use_attention,
+        use_head_forward_embedding=use_head_forward_embedding,
     )
     beh_model.load_state_dict(state)
     beh_model.eval()
 
-    # 用 scene 构建序列，特征统一 14 维（YOLO 可检测的 head/food/x2 及推导特征）
+    use_metadata = False
+    scene_indices = []
     if input_dim >= 14:
         dataset_dir = Path(args.dataset) if args.dataset else (ROOT / "dataset")
         if not dataset_dir.is_absolute():
             dataset_dir = ROOT / dataset_dir
         meta_path = dataset_dir / "metadata.json"
-        use_metadata = False
         if meta_path.exists():
             metadata = json.loads(meta_path.read_text(encoding="utf-8"))
             entries = [m for m in metadata if m.get("batch") == batch_path.name and m.get("episode") == args.episode]
@@ -247,17 +302,12 @@ def main():
     else:
         scene_features_for_model = scene_features
         print(f"行为模型 input_dim={input_dim}, 全帧 {len(scene_features)} 帧")
-    base_dim = 16
-    if input_dim in (14, 28, 42) or (input_dim >= 14 and input_dim % 14 == 0 and input_dim % 16 != 0):
-        base_dim = 14
+    base_cont_dim = 17 if use_head_forward_embedding else 16
+    scenes_for_model = [scenes[i] for i in scene_indices if i < len(scenes)] if use_metadata and scene_indices else scenes
     last_reasons = {si: gt_annotations[si].get("reason", "in_progress") for si in range(len(gt_annotations))}
-    snake_seqs = _build_seq_features(scene_features_for_model, base_dim, last_frame_reasons=last_reasons)
-    if base_dim == 14 and snake_seqs:
-        first_seq = next(iter(snake_seqs.values()))
-        if first_seq and len(first_seq[0]) > 14:
-            snake_seqs = {si: [f[:14] for f in seq] for si, seq in snake_seqs.items()}
+    snake_seqs = _build_seq_features(scene_features_for_model, scenes_for_model, base_cont_dim, last_frame_reasons=last_reasons)
 
-    def _merge_frame_context(seq: list[list[float]], base: int = 16, half: int = 1) -> list[list[float]]:
+    def _merge_frame_context(seq: list[list[float]], base: int, half: int) -> list[list[float]]:
         if half <= 0:
             return seq
         n = len(seq)
@@ -266,22 +316,22 @@ def main():
             for i in range(n)
         ]
 
-    frame_ctx = input_dim // base_dim if input_dim >= base_dim and input_dim % base_dim == 0 else 1
+    frame_ctx = input_dim // base_cont_dim if input_dim >= base_cont_dim and input_dim % base_cont_dim == 0 else 1
     half = frame_ctx // 2
     if half > 0:
-        snake_seqs = {si: _merge_frame_context(seq, base_dim, half) for si, seq in snake_seqs.items()}
+        snake_seqs = {si: (_merge_frame_context(seq_c, base_cont_dim, half), seq_h) for si, (seq_c, seq_h) in snake_seqs.items()}
 
-    # 对每条蛇跑行为模型，取每个端点的预测
     snake_preds: dict[int, list[tuple[int, str, str, float]]] = defaultdict(list)
-    for si, seq in snake_seqs.items():
+    for si, (seq_c, seq_h) in snake_seqs.items():
         with torch.no_grad():
-            x = torch.tensor([seq], dtype=torch.float32)
-            logits_c, logits_r = beh_model(x, None)
+            x = torch.tensor([seq_c], dtype=torch.float32)
+            x_hf = torch.tensor([seq_h], dtype=torch.long) if use_head_forward_embedding else None
+            logits_c, logits_r = beh_model(x, None, x_head_forward=x_hf)
             pred_c = logits_c.argmax(1).item()
             pred_r = logits_r.argmax(1).item()
         label = "incorrect" if pred_c == 1 else "correct"
         reason = REASON_NAMES[pred_r]
-        snake_preds[si] = [(len(seq) - 1, label, reason)]
+        snake_preds[si] = [(len(seq_c) - 1, label, reason)]
 
     # 每帧展示：GT + 预测，用于对比
     labels_per_frame: dict[int, dict[int, tuple[str, str, str, str, bool]]] = defaultdict(dict)

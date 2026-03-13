@@ -159,15 +159,20 @@ def extract_sequences_from_labels(
     entries: list[dict], dataset_dir: Path
 ) -> dict[int, list[dict]]:
     """
-    从 label 文件读取每蛇每帧特征: head, food, x2, ate_food, ate_x2, is_dead, steps_since_food。
-    返回: snake_idx -> [{"xc", "yc", "fx", "fy", "xx", "xy", "has_x2", "ate_food", "ate_x2", "is_dead", "steps_since_food", "t"}, ...]
+    从 label + behavior 文件读取每蛇每帧特征。
+    含 head_forward_type(0/1/2), ate_food_while_x2_exists。
     """
     snake_seqs: dict[int, list[dict]] = defaultdict(list)
     prev_rows: list[tuple] | None = None
     steps_counters: list[int] = []
     for t, e in enumerate(entries):
         lbl_path = dataset_dir / e["split"] / "labels" / f"{e['id']}.txt"
+        beh_path = dataset_dir / e["split"] / "behavior" / f"{e['id']}.json"
         rows = _parse_label_per_snake(lbl_path)
+        head_forward_list: list[int] = []
+        if beh_path.exists():
+            beh = json.loads(beh_path.read_text(encoding="utf-8"))
+            head_forward_list = beh.get("head_forward_type", [])
         if t == 0:
             steps_counters = [0] * len(rows)
         while len(steps_counters) < len(rows):
@@ -176,6 +181,9 @@ def extract_sequences_from_labels(
             hx, hy, fx, fy, xx, xy, has_x2, is_dead = curr[:8]
             prev = prev_rows[si] if prev_rows and si < len(prev_rows) else None
             ate_food, ate_x2 = _infer_ate_events(prev, curr)
+            ate_food_while_x2 = 1.0 if (ate_food and has_x2) else 0.0
+            head_forward = int(head_forward_list[si]) if si < len(head_forward_list) else 0
+            head_forward = max(0, min(2, head_forward))
             if ate_food:
                 steps_counters[si] = 0
             else:
@@ -185,6 +193,8 @@ def extract_sequences_from_labels(
                 "xc": hx, "yc": hy,
                 "fx": fx, "fy": fy, "xx": xx, "xy": xy, "has_x2": has_x2,
                 "ate_food": ate_food, "ate_x2": ate_x2,
+                "ate_food_while_x2_exists": ate_food_while_x2,
+                "head_forward_type": head_forward,
                 "is_dead": is_dead, "steps_since_food": steps_since_food,
                 "t": t,
             })

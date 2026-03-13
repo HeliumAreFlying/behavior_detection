@@ -21,12 +21,17 @@ REASON_TO_IDX = {r: i for i, r in enumerate(REASON_NAMES)}
 NUM_REASONS = len(REASON_NAMES)
 
 
+# 蛇头前方格子类型: 0=空, 1=自己身体, 2=其他蛇。用 Embedding 处理
+HEAD_FORWARD_VOCAB = 3
+HEAD_FORWARD_EMBED_DIM = 8
+
+
 class BehaviorCorrectnessModel(nn.Module):
     """
-    输入: (batch, seq_len, input_dim) 蛇头等时序特征
+    输入: x_cont (batch, seq_len, cont_dim) + x_head_forward (batch, seq_len) 0/1/2
     输出: correct (batch, 2), reason (batch, num_reasons)
 
-    改进: 双向 LSTM + 自注意力 (残差连接)
+    改进: 双向 LSTM + 自注意力 + head_forward Embedding
     """
 
     def __init__(
@@ -37,16 +42,25 @@ class BehaviorCorrectnessModel(nn.Module):
         dropout: float = 0.3,
         bidirectional: bool = True,
         use_attention: bool = True,
+        head_forward_embed_dim: int = HEAD_FORWARD_EMBED_DIM,
+        use_head_forward_embedding: bool = True,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.bidirectional = bidirectional
         self.use_attention = use_attention
+        self.use_head_forward_embedding = use_head_forward_embedding
+        if use_head_forward_embedding:
+            self.head_forward_embed = nn.Embedding(HEAD_FORWARD_VOCAB, head_forward_embed_dim, padding_idx=0)
+            lstm_input_dim = input_dim + head_forward_embed_dim
+        else:
+            self.head_forward_embed = None
+            lstm_input_dim = input_dim
         lstm_hidden = hidden_dim * 2 if bidirectional else hidden_dim
 
         self.lstm = nn.LSTM(
-            input_dim,
+            lstm_input_dim,
             hidden_dim,
             num_layers=num_layers,
             batch_first=True,
@@ -72,22 +86,33 @@ class BehaviorCorrectnessModel(nn.Module):
         return ctx[:, -1, :]  # (B, D)
 
     def forward(
-        self, x: torch.Tensor, lengths: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self,
+        x: torch.Tensor,
+        lengths: torch.Tensor | None = None,
+        x_head_forward: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        x: (batch, seq_len, input_dim)
+        x: (batch, seq_len, cont_dim) 连续特征
+        x_head_forward: (batch, seq_len) 0/1/2，None 时用 0 填充
         lengths: (batch,) 有效长度，None 时假设无 padding
         """
+        if self.use_head_forward_embedding:
+            if x_head_forward is None:
+                x_head_forward = torch.zeros(x.size(0), x.size(1), dtype=torch.long, device=x.device)
+            hf_emb = self.head_forward_embed(x_head_forward.clamp(0, HEAD_FORWARD_VOCAB - 1))
+            x_in = torch.cat([x, hf_emb], dim=-1)
+        else:
+            x_in = x
         if lengths is not None:
             packed = nn.utils.rnn.pack_padded_sequence(
-                x, lengths.cpu(), batch_first=True, enforce_sorted=False
+                x_in, lengths.cpu(), batch_first=True, enforce_sorted=False
             )
             out, _ = self.lstm(packed)
             out, _ = nn.utils.rnn.pad_packed_sequence(out, batch_first=True)
             last_idx = (lengths - 1).clamp(min=0).long()
             last_out = out[torch.arange(out.size(0), device=out.device), last_idx]
         else:
-            out, _ = self.lstm(x)
+            out, _ = self.lstm(x_in)
             last_out = out[:, -1, :]
 
         if self.use_attention:
