@@ -21,8 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 GRID_W = GRID_H = 15
-CELL_SIZE = 40
-IMG_W = IMG_H = GRID_W * CELL_SIZE  # 600
+IMG_W = IMG_H = 640
 
 
 def _norm(x: float, size: int) -> float:
@@ -159,11 +158,12 @@ def main():
     pygame.init()
     pygame.display.set_mode((1, 1))
 
-    # 渲染帧
+    # 渲染帧（蛇头：开局菱形→三角→撞击圆形）
     frames_np = []
     scene_features = []
-    for sc in scenes:
-        surf = render_scene(sc)
+    for ti, sc in enumerate(scenes):
+        prev_sc = scenes[ti - 1] if ti > 0 else None
+        surf = render_scene(sc, scene_idx=ti, prev_scene=prev_sc, total_scenes=len(scenes))
         arr = np.transpose(pygame.surfarray.array3d(surf), (1, 0, 2))
         frames_np.append(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
         scene_features.append(_scene_to_features(sc))
@@ -250,13 +250,12 @@ def main():
     for si, seq in snake_seqs.items():
         with torch.no_grad():
             x = torch.tensor([seq], dtype=torch.float32)
-            logits_c, logits_r, logits_ep = beh_model(x, None)
+            logits_c, logits_r = beh_model(x, None)
             pred_c = logits_c.argmax(1).item()
             pred_r = logits_r.argmax(1).item()
-            ep_prob = torch.sigmoid(logits_ep).item()
         label = "incorrect" if pred_c == 1 else "correct"
         reason = REASON_NAMES[pred_r]
-        snake_preds[si] = [(len(seq) - 1, label, reason, ep_prob)]
+        snake_preds[si] = [(len(seq) - 1, label, reason)]
 
     # 每帧展示：GT + 预测，用于对比
     labels_per_frame: dict[int, dict[int, tuple[str, str, str, str, bool]]] = defaultdict(dict)
@@ -265,7 +264,7 @@ def main():
             gt_label = gt_annotations[si]["label"] if si < len(gt_annotations) else "?"
             gt_reason = gt_annotations[si]["reason"] if si < len(gt_annotations) else "?"
             if si in snake_preds:
-                _, pred_label, pred_reason, _ = snake_preds[si][0]
+                _, pred_label, pred_reason = snake_preds[si][0]
                 match = (gt_label == pred_label and gt_reason == pred_reason) if not args.label_only else (gt_label == pred_label)
             else:
                 pred_label, pred_reason, match = "-", "-", False

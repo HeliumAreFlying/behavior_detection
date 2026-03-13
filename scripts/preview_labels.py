@@ -48,8 +48,8 @@ def draw_preview(
     lbl_path: Path,
     beh_path: Path | None,
     out_path: Path,
-    img_w: int = 600,
-    img_h: int = 600,
+    img_w: int = 640,
+    img_h: int = 640,
 ) -> None:
     """在图像上绘制 YOLO 标注 + 行为标签并保存"""
     try:

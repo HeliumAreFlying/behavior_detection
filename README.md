@@ -9,7 +9,7 @@
 ```mermaid
 flowchart TB
     A["1. 数据生成<br/>data_generator, batch JSON"]
-    B["2. 渲染与导出<br/>render_and_export, 图像+YOLO label"]
+    B["2. 渲染与导出<br/>render_and_export, 640×640 图像+YOLO label"]
     C["3. 目标检测+跟踪<br/>YOLO+ByteTrack 可选"]
 
     A --> B --> C
@@ -31,7 +31,7 @@ flowchart TB
 | 阶段 | 脚本 | 输入 | 输出 |
 |------|------|------|------|
 | 1. 数据生成 | `data_generator.py` | 随机种子、规则参数 | `batches/batch_*.json` |
-| 2. 渲染导出 | `render_and_export.py` | batch JSON | `dataset/` (images + labels + metadata) |
+| 2. 渲染导出 | `render_and_export.py` | batch JSON | `dataset/` (640×640 images + labels + metadata) |
 | 3. 目标检测 | YOLO `train` / `track` | 渲染图像 | 检测框 + track_id |
 | 4. 序列构建 | `run_track_and_prepare.py` | dataset 或 batch | `sequences/track_sequences.json` |
 | 5. 行为训练 | `train_behavior.py` | sequences 或 grid batches | `checkpoints/behavior/best.pt` |
@@ -124,31 +124,43 @@ python data_generator.py -b 100 -s 100 -w 8
 
 ### 完整训练流程（含 YOLO）
 
-```bash
-# 1. 数据生成
-python data_generator.py --batches 10 --batch-size 100
+渲染输出 **640×640** 图像；蛇头视觉：开局菱形 → 三角(尖指方向) → 撞击圆形。
 
-# 2. 渲染与导出 YOLO 数据集（全帧导出，不跳帧；-w 8 可多进程）
+| 步骤 | 命令 | 说明 |
+|------|------|------|
+| 1 | 数据生成 | 多进程 `-w 8` 加速 |
+| 2 | 渲染导出 | 640×640，全帧不跳帧 |
+| 3 | YOLO 训练 | 可选，检测 snake_head/body, food, x2 |
+| 4 | 序列准备 | 路径 A 纯 label / 路径 B YOLO 跟踪 |
+| 5 | 行为训练 | 双向 LSTM + 注意力，`--boost-incorrect` 提升错误检测 |
+| 6 | 评估 | 自动搜索最优 F1 阈值，输出 P/R/mAP50/mAP50-95 |
+| 7 | 演示视频 | `-d dataset` 与训练帧一致；`--draw-boxes` 绘制 YOLO 框 |
+
+```bash
+# 1. 数据生成（-w 8 多进程）
+python data_generator.py --batches 10 --batch-size 100 -w 8
+
+# 2. 渲染与导出 YOLO 数据集（640×640，全帧；-w 8 多进程）
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 
-# 3. (可选) YOLO 训练（检测 snake_head/body, food, x2）
-yolo train model=yolov26n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
+# 3. (可选) YOLO 训练（检测 snake_head/body, food, x2；imgsz 与渲染一致）
+yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 
-# 4. 序列准备（二选一，-w 可多进程）
-# 路径 A：纯 label，无需 YOLO
+# 4. 序列准备（二选一）
+# 路径 A：纯 label，无需 YOLO（-w 8 多进程）
 python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
 
-# 路径 B：YOLO 跟踪（需先完成步骤 3，GPU 时默认单进程）
+# 路径 B：YOLO 跟踪（需先完成步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（错误检测率低时可加 --boost-incorrect）
+# 5. 行为模型训练（双向 LSTM + 注意力；错误检测率低时加 --boost-incorrect）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
 
 # 6. 评估（默认自动搜索最优 F1 阈值）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
-# 7. 演示视频（路径 B 可加 -m YOLO权重 --draw-boxes）
+# 7. 演示视频（-d dataset 保证帧与训练一致；路径 B 可加 -m YOLO权重 --draw-boxes）
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -d dataset -o demo.mp4
 ```
 
@@ -169,11 +181,11 @@ python replay_ui.py
 ### 3. 渲染与导出 YOLO 数据集
 
 ```bash
-# 全帧导出（不跳帧），多进程加速：-w 8
+# 640×640 全帧导出（不跳帧），多进程：-w 8
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 ```
 
-输出 `dataset/train`, `dataset/val`（images + labels + metadata.json）。
+输出 `dataset/train`, `dataset/val`（640×640 images + labels + metadata.json）。蛇头视觉：开局菱形、前进三角(尖指方向)、撞击圆形。
 
 ### 4. 序列准备（二选一）
 
@@ -203,11 +215,11 @@ python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoint
 ### 6. 实战演示视频
 
 ```bash
-# 行为标注
-python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -o demo.mp4
+# 行为标注（推荐 -d dataset 保证帧与训练一致）
+python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -d dataset -o demo.mp4
 
-# YOLO + 行为联合标注
-python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c checkpoints/behavior/best.pt -o demo.mp4 --draw-boxes
+# YOLO 框 + 行为联合标注（路径 B）
+python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c checkpoints/behavior/best.pt -d dataset -o demo.mp4 --draw-boxes
 ```
 
 ### 7. 全量评估（P、R、mAP50、mAP50-95）
@@ -271,7 +283,7 @@ behavior_detection/
 ├── models/
 │   └── behavior_correctness.py # 双向LSTM+注意力 行为/正确性模型
 ├── batches/                 # 生成的对局数据
-├── dataset/                 # 渲染输出的 YOLO 数据集
+├── dataset/                 # 渲染输出 (640×640 YOLO 数据集)
 ├── sequences/               # 序列特征
 └── checkpoints/behavior/    # 模型权重
 ```

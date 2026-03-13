@@ -27,12 +27,10 @@ except ImportError:
 
 from game import SNAKE_COLORS
 
-# 渲染参数（与 replay_ui 一致）
-CELL_SIZE = 40
-GRID_W = 15
-GRID_H = 15
-IMG_W = GRID_W * CELL_SIZE
-IMG_H = GRID_H * CELL_SIZE
+# 渲染参数（与 replay_ui 一致），640x640 输出
+IMG_W = IMG_H = 640
+GRID_W = GRID_H = 15
+CELL_SIZE = IMG_W / GRID_W  # 640/15 ≈ 42.67
 BG = (28, 28, 32)
 GRID_LINE = (48, 48, 56)
 
@@ -87,8 +85,34 @@ def scene_to_bboxes(scene: dict) -> list[tuple[int, float, float, float, float]]
     return lines
 
 
-def render_scene(scene: dict) -> "pygame.Surface":
-    """将 scene 渲染为 600x600 图像（仅游戏网格）"""
+def _draw_snake_head(screen: "pygame.Surface", sx: int, sy: int, col: tuple,
+                     shape: str, dx: int = 1, dy: int = 0) -> None:
+    """蛇头形状：diamond 开局 | triangle 前进(尖指方向) | circle 撞击死亡"""
+    cx = int(sx * CELL_SIZE + CELL_SIZE / 2)
+    cy = int(sy * CELL_SIZE + CELL_SIZE / 2)
+    r = max(2, int(CELL_SIZE / 2) - 2)
+    if shape == "diamond":
+        pts = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+        pygame.draw.polygon(screen, col, pts)
+        pygame.draw.polygon(screen, (40, 40, 40), pts, 1)
+    elif shape == "circle":
+        pygame.draw.circle(screen, col, (cx, cy), r)
+        pygame.draw.circle(screen, (40, 40, 40), (cx, cy), r, 1)
+    else:  # triangle, tip in (dx, dy) direction
+        if dx == 0 and dy == 0:
+            dx, dy = 1, 0
+        tip = (cx + dx * r, cy + dy * r)
+        perp = (-dy, dx) if (dx or dy) else (1, 0)
+        base1 = (cx - dx * r * 0.6 + perp[0] * r * 0.6, cy - dy * r * 0.6 + perp[1] * r * 0.6)
+        base2 = (cx - dx * r * 0.6 - perp[0] * r * 0.6, cy - dy * r * 0.6 - perp[1] * r * 0.6)
+        pts = [tip, base1, base2]
+        pygame.draw.polygon(screen, col, pts)
+        pygame.draw.polygon(screen, (40, 40, 40), pts, 1)
+
+
+def render_scene(scene: dict, scene_idx: int = 0, prev_scene: dict | None = None,
+                 total_scenes: int = 1) -> "pygame.Surface":
+    """将 scene 渲染为 640x640 图像。蛇头：开局菱形→三角形(尖指方向)→撞击圆形"""
     screen = pygame.Surface((IMG_W, IMG_H))
     screen.fill(BG)
 
@@ -96,13 +120,19 @@ def render_scene(scene: dict) -> "pygame.Surface":
     if not snakes_data:
         return screen
 
+    anns = scene.get("snake_annotations", [])
+    is_last = (scene_idx == total_scenes - 1) if total_scenes else False
+    dead_reasons = {"self_collision", "snake_collision"}
+
     # 网格线
     for x in range(GRID_W + 1):
-        pygame.draw.line(screen, GRID_LINE, (x * CELL_SIZE, 0), (x * CELL_SIZE, IMG_H))
+        px = int(x * CELL_SIZE)
+        pygame.draw.line(screen, GRID_LINE, (px, 0), (px, IMG_H))
     for y in range(GRID_H + 1):
-        pygame.draw.line(screen, GRID_LINE, (0, y * CELL_SIZE), (IMG_W, y * CELL_SIZE))
+        py = int(y * CELL_SIZE)
+        pygame.draw.line(screen, GRID_LINE, (0, py), (IMG_W, py))
 
-    # 食物(F)、x2、蛇身(H/无字)，每阵营一色
+    # 食物(F)、x2
     try:
         cell_font = pygame.font.SysFont("arial", 14)
     except Exception:
@@ -114,23 +144,32 @@ def render_scene(scene: dict) -> "pygame.Surface":
         x2 = s.get("x2")
         if food:
             fx, fy = food[0] % GRID_W, food[1] % GRID_H
-            rect = (fx * CELL_SIZE + 2, fy * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4)
+            rect = (int(fx * CELL_SIZE + 2), int(fy * CELL_SIZE + 2), int(CELL_SIZE - 4), int(CELL_SIZE - 4))
             pygame.draw.rect(screen, col, rect, border_radius=4)
             if cell_font:
                 txt = cell_font.render("F", True, (40, 40, 40))
                 tw, th = txt.get_size()
-                screen.blit(txt, (fx * CELL_SIZE + (CELL_SIZE - tw) // 2, fy * CELL_SIZE + (CELL_SIZE - th) // 2))
+                screen.blit(txt, (int(fx * CELL_SIZE + (CELL_SIZE - tw) // 2), int(fy * CELL_SIZE + (CELL_SIZE - th) // 2)))
         if x2:
             xx, xy = x2[0] % GRID_W, x2[1] % GRID_H
-            rect = (xx * CELL_SIZE + 2, xy * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4)
+            rect = (int(xx * CELL_SIZE + 2), int(xy * CELL_SIZE + 2), int(CELL_SIZE - 4), int(CELL_SIZE - 4))
             pygame.draw.rect(screen, col, rect, border_radius=4)
             if cell_font:
                 txt = cell_font.render("x2", True, (40, 40, 40))
                 tw, th = txt.get_size()
-                screen.blit(txt, (xx * CELL_SIZE + (CELL_SIZE - tw) // 2, xy * CELL_SIZE + (CELL_SIZE - th) // 2))
+                screen.blit(txt, (int(xx * CELL_SIZE + (CELL_SIZE - tw) // 2), int(xy * CELL_SIZE + (CELL_SIZE - th) // 2)))
 
-    # 蛇身：同色，蛇头显示 H
-    for s in snakes_data:
+    # 蛇身：蛇头按状态画菱形/三角/圆
+    prev_heads = []
+    if prev_scene and prev_scene.get("snakes"):
+        for sp in prev_scene["snakes"]:
+            b = sp.get("body", [])
+            if b:
+                prev_heads.append((int(b[0][0]) % GRID_W, int(b[0][1]) % GRID_H))
+            else:
+                prev_heads.append(None)
+
+    for si, s in enumerate(snakes_data):
         body = s.get("body", [])
         cid = s.get("color_id", 0) % len(SNAKE_COLORS)
         col = SNAKE_COLORS[cid]["body"]
@@ -141,12 +180,32 @@ def render_scene(scene: dict) -> "pygame.Surface":
                 continue
             sx = ((sx % GRID_W) + GRID_W) % GRID_W
             sy = ((sy % GRID_H) + GRID_H) % GRID_H
-            rect = (sx * CELL_SIZE + 1, sy * CELL_SIZE + 1, CELL_SIZE - 2, CELL_SIZE - 2)
+            rect = (int(sx * CELL_SIZE + 1), int(sy * CELL_SIZE + 1), int(CELL_SIZE - 2), int(CELL_SIZE - 2))
             pygame.draw.rect(screen, col, rect, border_radius=3)
-            if i == 0 and cell_font:
-                txt = cell_font.render("H", True, (40, 40, 40))
-                tw, th = txt.get_size()
-                screen.blit(txt, (sx * CELL_SIZE + (CELL_SIZE - tw) // 2, sy * CELL_SIZE + (CELL_SIZE - th) // 2))
+            if i == 0:
+                ann = anns[si] if si < len(anns) else {}
+                reason = ann.get("reason", "")
+                if scene_idx == 0:
+                    _draw_snake_head(screen, sx, sy, col, "diamond")
+                elif is_last and reason in dead_reasons:
+                    _draw_snake_head(screen, sx, sy, col, "circle")
+                else:
+                    dx, dy = 0, 0
+                    if len(body) >= 2:
+                        dx = body[0][0] - body[1][0]
+                        dy = body[0][1] - body[1][1]
+                    elif si < len(prev_heads) and prev_heads[si]:
+                        ph = prev_heads[si]
+                        dx = sx - ph[0]
+                        dy = sy - ph[1]
+                    # 网格环绕时归一化到 -1,0,1
+                    if dx > 1: dx = -1
+                    elif dx < -1: dx = 1
+                    if dy > 1: dy = -1
+                    elif dy < -1: dy = 1
+                    if dx == 0 and dy == 0:
+                        dx = 1
+                    _draw_snake_head(screen, sx, sy, col, "triangle", dx, dy)
 
     return screen
 
@@ -175,8 +234,8 @@ def _init_pygame_worker():
 
 def _process_one_item(item: tuple) -> dict:
     """处理单个样本：渲染 + 保存（在子进程中调用）"""
-    scene, img_path, lbl_path, beh_path, metadata = item
-    surf = render_scene(scene)
+    scene, prev_scene, sc_idx, total_scenes, img_path, lbl_path, beh_path, metadata = item
+    surf = render_scene(scene, scene_idx=sc_idx, prev_scene=prev_scene, total_scenes=total_scenes)
     pygame.image.save(surf, img_path)
 
     bboxes = scene_to_bboxes(scene)
@@ -240,16 +299,16 @@ def main():
     for d in (train_img, train_lbl, train_beh, val_img, val_lbl, val_beh):
         d.mkdir(parents=True, exist_ok=True)
 
-    all_samples: list[tuple[dict, int, int, str]] = []
+    all_samples: list[tuple[dict, dict | None, int, int, int, int, str]] = []
     for bf in batch_files:
         data = json.loads(bf.read_text(encoding="utf-8"))
         for ep_idx, ep in enumerate(data.get("episodes", [])):
             scenes = ep.get("scenes", [])
-            ep_reason = ep.get("reason", "")
             for sc_idx, scene in enumerate(scenes):
                 if not scene.get("snakes"):
                     continue
-                all_samples.append((scene, ep_idx, sc_idx, bf.name))
+                prev = scenes[sc_idx - 1] if sc_idx > 0 else None
+                all_samples.append((scene, prev, sc_idx, len(scenes), ep_idx, sc_idx, bf.name))
 
     n = len(all_samples)
     workers = min(args.workers or (mp.cpu_count() or 4), n)  # 不超过任务数
@@ -261,10 +320,10 @@ def main():
     train_idx = set(indices[:train_n])
     val_idx = set(indices[train_n:])
 
-    # 构建任务列表：(scene, img_path, lbl_path, beh_path, metadata)
+    # 构建任务列表：(scene, prev_scene, scene_idx, total_scenes, img_path, lbl_path, beh_path, metadata)
     work_items: list[tuple] = []
     for global_idx in range(n):
-        scene, ep_idx, sc_idx, batch_name = all_samples[global_idx]
+        scene, prev_scene, sc_idx, total_scenes, ep_idx, _, batch_name = all_samples[global_idx]
         split = "val" if global_idx in val_idx else "train"
         img_dir = output_dir / split / "images"
         lbl_dir = output_dir / split / "labels"
@@ -272,7 +331,7 @@ def main():
         name = f"{global_idx:06d}"
         metadata = {"id": name, "split": split, "batch": batch_name, "episode": ep_idx, "scene": sc_idx}
         work_items.append((
-            scene,
+            scene, prev_scene, sc_idx, total_scenes,
             str(img_dir / f"{name}.png"),
             str(lbl_dir / f"{name}.txt"),
             str(beh_dir / f"{name}.json"),

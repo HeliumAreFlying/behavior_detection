@@ -438,7 +438,6 @@ def main():
     if args.class_weights:
         ce_kw_reason["weight"] = torch.tensor(reason_weights, dtype=torch.float32).to(device)
     ce_reason = nn.CrossEntropyLoss(**ce_kw_reason)
-    bce = nn.BCEWithLogitsLoss()
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -455,13 +454,7 @@ def main():
             y_label, y_reason = y_label.to(device), y_reason.to(device)
             y_ep = y_ep.to(device)
             opt.zero_grad()
-            outputs = model(x, lengths)
-            if len(outputs) == 3:
-                logits_c, logits_r, logits_ep = outputs
-            else:
-                logits_c, logits_r = outputs
-                logits_ep = None
-            loss_ep = bce(logits_ep, y_ep) if logits_ep is not None else x.new_zeros(1)
+            logits_c, logits_r = model(x, lengths)
             mask = (y_ep > 0.5).squeeze(1)
             if mask.any():
                 lc = logits_c[mask]
@@ -474,11 +467,11 @@ def main():
                 else:
                     loss_c = ce_label(lc, yl)
                 loss_r = ce_reason(logits_r[mask], y_reason[mask])
-                loss = loss_ep + 0.5 * (loss_c + loss_r)
+                loss = 0.5 * (loss_c + loss_r)
                 train_correct += (logits_c[mask].argmax(1) == y_label[mask]).sum().item()
                 train_total += mask.sum().item()
             else:
-                loss = loss_ep
+                loss = x.new_zeros(1)
             loss.backward()
             opt.step()
             train_loss += loss.item()
@@ -490,8 +483,7 @@ def main():
             for x, lengths, y_label, y_reason, y_ep in val_loader:
                 x, lengths = x.to(device), lengths.to(device)
                 y_label, y_ep = y_label.to(device), y_ep.to(device)
-                outputs = model(x, lengths)
-                logits_c = outputs[0]
+                logits_c, _ = model(x, lengths)
                 mask = (y_ep > 0.5).squeeze(1)
                 if mask.any():
                     pred = logits_c[mask].argmax(1)

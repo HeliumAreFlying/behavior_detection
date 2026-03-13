@@ -202,6 +202,28 @@ def choose_json_file(initial_dir: Path | None = None) -> Path | None:
     return Path(path) if path else None
 
 
+def _draw_snake_head(screen: pygame.Surface, cx: int, cy: int, r: int, col: tuple,
+                     shape: str, dx: int = 1, dy: int = 0) -> None:
+    """蛇头形状：diamond 开局 | triangle 前进 | circle 撞击死亡"""
+    if shape == "diamond":
+        pts = [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+        pygame.draw.polygon(screen, col, pts)
+        pygame.draw.polygon(screen, (40, 40, 40), pts, 1)
+    elif shape == "circle":
+        pygame.draw.circle(screen, col, (cx, cy), r)
+        pygame.draw.circle(screen, (40, 40, 40), (cx, cy), r, 1)
+    else:
+        if dx == 0 and dy == 0:
+            dx, dy = 1, 0
+        tip = (cx + dx * r, cy + dy * r)
+        perp = (-dy, dx)
+        base1 = (cx - dx * r * 0.6 + perp[0] * r * 0.6, cy - dy * r * 0.6 + perp[1] * r * 0.6)
+        base2 = (cx - dx * r * 0.6 - perp[0] * r * 0.6, cy - dy * r * 0.6 - perp[1] * r * 0.6)
+        pts = [tip, base1, base2]
+        pygame.draw.polygon(screen, col, pts)
+        pygame.draw.polygon(screen, (40, 40, 40), pts, 1)
+
+
 def draw_scene(
     screen: pygame.Surface,
     scene: dict,
@@ -224,6 +246,7 @@ def draw_scene(
     open_btn_rect: pygame.Rect,
     btn_hover: bool,
     snake_annotations: list[dict] | None = None,
+    prev_scene: dict | None = None,
 ) -> None:
     screen.fill(BG)
 
@@ -280,21 +303,55 @@ def draw_scene(
             screen.blit(txt, (margin_x + xx * cell_size + (cell_size - tw) // 2,
                              grid_y + xy * cell_size + (cell_size - th) // 2))
 
-    # 蛇身：同色，蛇头显示 H
-    for s in snakes_data:
+    # 蛇身：蛇头按状态画菱形/三角/圆
+    anns = scene.get("snake_annotations", [])
+    is_last = (scene_idx == total_scenes - 1) if total_scenes else False
+    dead_reasons = {"self_collision", "snake_collision"}
+    prev_heads = []
+    if prev_scene and prev_scene.get("snakes"):
+        for sp in prev_scene["snakes"]:
+            b = sp.get("body", [])
+            prev_heads.append((int(b[0][0]) % grid_w, int(b[0][1]) % grid_h) if b else None)
+
+    for si, s in enumerate(snakes_data):
         body = s.get("body", [])
         cid = s.get("color_id", 0) % len(SNAKE_COLORS)
         col = SNAKE_COLORS[cid]["body"]
-        for i, (sx, sy) in enumerate(body):
+        for i, pos in enumerate(body):
+            try:
+                sx, sy = int(pos[0]), int(pos[1])
+            except (IndexError, TypeError):
+                continue
             sx, sy = sx % grid_w, sy % grid_h
             rect = (margin_x + sx * cell_size + 1, grid_y + sy * cell_size + 1,
                     cell_size - 2, cell_size - 2)
             pygame.draw.rect(screen, col, rect, border_radius=3)
             if i == 0:
-                txt = small_font.render("H", True, (40, 40, 40))
-                tw, th = txt.get_size()
-                screen.blit(txt, (margin_x + sx * cell_size + (cell_size - tw) // 2,
-                                 grid_y + sy * cell_size + (cell_size - th) // 2))
+                cx = margin_x + sx * cell_size + cell_size // 2
+                cy = grid_y + sy * cell_size + cell_size // 2
+                r = cell_size // 2 - 2
+                ann = anns[si] if si < len(anns) else {}
+                reason = ann.get("reason", "")
+                if scene_idx == 0:
+                    _draw_snake_head(screen, cx, cy, r, col, "diamond")
+                elif is_last and reason in dead_reasons:
+                    _draw_snake_head(screen, cx, cy, r, col, "circle")
+                else:
+                    dx, dy = 0, 0
+                    if len(body) >= 2:
+                        dx = body[0][0] - body[1][0]
+                        dy = body[0][1] - body[1][1]
+                    elif si < len(prev_heads) and prev_heads[si]:
+                        ph = prev_heads[si]
+                        dx = sx - ph[0]
+                        dy = sy - ph[1]
+                    if dx > 1: dx = -1
+                    elif dx < -1: dx = 1
+                    if dy > 1: dy = -1
+                    elif dy < -1: dy = 1
+                    if dx == 0 and dy == 0:
+                        dx = 1
+                    _draw_snake_head(screen, cx, cy, r, col, "triangle", dx, dy)
 
     # 无数据时显示提示（网格中央）
     if total_episodes == 0:
@@ -390,7 +447,7 @@ def main():
         default_path = base / "batches" / "batch_00000.json"
     episodes, current_path = load_dataset(default_path)
 
-    cell_size = 40
+    cell_size = 43  # 15*43≈645，接近 640x640
     grid_w = 15
     grid_h = 15
     margin_x = 32
@@ -528,15 +585,18 @@ def main():
         else:
             disp_label, disp_reason = ep.get("label", "-"), ep.get("reason", "-")
             snake_ann = None
+        scenes = ep.get("scenes", []) if episodes else []
+        prev_sc = scenes[scene_idx - 1] if scene_idx > 0 and scenes else None
         draw_scene(
             screen, scene, cell_size, margin_x, margin_y,
             grid_w, grid_h, panel_x, panel_w,
             font, small_font,
             disp_label, disp_reason,
             episode_idx, len(episodes) or 1,
-            scene_idx, len(ep.get("scenes", [])) or 1,
+            scene_idx, len(scenes) or 1,
             path_str, open_btn_rect, btn_hover,
             snake_annotations=snake_ann,
+            prev_scene=prev_sc,
         )
 
         pygame.display.flip()

@@ -17,31 +17,33 @@
 
 ## 完整训练流程（含 YOLO）
 
+渲染 640×640；蛇头：开局菱形 → 三角(尖指) → 撞击圆形。行为模型：双向 LSTM + 注意力。
+
 ```bash
 # 1. 数据生成（-w 8 多进程）
 python data_generator.py --batches 10 --batch-size 100 -w 8
 
-# 2. 渲染与导出 YOLO 数据集（全帧，不跳帧；-w 8 多进程）
+# 2. 渲染与导出（640×640 全帧，-w 8 多进程）
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 
-# 3. (可选) YOLO 训练（检测 snake_head/body, food, x2）
-yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=600 batch=64
+# 3. (可选) YOLO 训练（imgsz=640 与渲染一致）
+yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 
-# 4. 序列准备（二选一，-w 多进程）
-# 路径 A：纯 label，无需 YOLO
+# 4. 序列准备
+# 路径 A：纯 label（-w 8）
 python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
 
-# 路径 B：YOLO 跟踪（需先完成步骤 3）
+# 路径 B：YOLO 跟踪（需步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
 # 5. 行为模型训练（--boost-incorrect 提升错误检测率）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
 
-# 6. 评估（默认自动搜索最优 F1 阈值，输出 P/R/mAP50/mAP50-95）
+# 6. 评估（自动搜索最优 F1 阈值）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
-# 7. 演示视频（路径 B 可加 -m YOLO权重 --draw-boxes）
+# 7. 演示视频（-d dataset 与训练一致；路径 B 加 -m 权重 --draw-boxes）
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -d dataset -o demo.mp4
 ```
 
@@ -56,7 +58,7 @@ python data_generator.py
 python data_generator.py -b 100 -s 100 -w 8
 ```
 
-## 2. 渲染与导出（支持多进程 `-w`）
+## 2. 渲染与导出（640×640，支持多进程 `-w`）
 
 ```bash
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2
