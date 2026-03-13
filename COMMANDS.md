@@ -1,5 +1,37 @@
 # 命令速查（分行）
 
+## 完整训练流程（含 YOLO）
+
+```bash
+# 1. 数据生成
+python data_generator.py --batches 10 --batch-size 100
+
+# 2. 渲染与导出 YOLO 数据集
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5
+
+# 3. (可选) YOLO 训练（检测 snake_head/body, food, x2）
+yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=600 batch=64
+
+# 4. 序列准备（二选一）
+# 路径 A：纯 label，无需 YOLO
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
+
+# 路径 B：YOLO 跟踪（需先完成步骤 3）
+python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
+
+# 5. 行为模型训练（推荐启用增强）
+python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
+  --class-weights --oversample --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
+
+# 6. 评估
+python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
+
+# 7. 演示视频（路径 B 可加 -m YOLO权重 --draw-boxes）
+python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/behavior/best.pt -d dataset -o demo.mp4
+```
+
+---
+
 ## 1. 数据生成
 
 ```bash
