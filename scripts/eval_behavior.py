@@ -196,7 +196,9 @@ def main():
     p.add_argument("--no-velocity", action="store_true", help="track 数据不加速度特征")
     p.add_argument("--max-samples", type=int, default=0, help="最多评估样本数，0=全部")
     p.add_argument("--incorrect-threshold", type=float, default=0.5,
-                   help="预测 incorrect 的阈值，P(incorrect)>=此值则判为错误。降低可提升 recall，如 0.3")
+                   help="预测 incorrect 的阈值（仅在 --no-threshold-search 时生效）")
+    p.add_argument("--no-threshold-search", action="store_true",
+                   help="不自动搜索阈值，使用 --incorrect-threshold 指定值")
     p.add_argument("--reason-override", action="store_true",
                    help="若预测 reason 为错误类(self_collision/snake_collision/x2_wasted/timeout)，强制 label=incorrect")
     args = p.parse_args()
@@ -277,21 +279,17 @@ def main():
             out.append(merged)
         return out
 
-    # 推理（支持 incorrect 阈值以平衡 precision/recall）
-    thresh = args.incorrect_threshold
+    # 推理
     INCORRECT_REASON_IDX = {3, 4, 5, 6}  # self_collision, snake_collision, x2_wasted, timeout
     if half > 0:
         seqs = _merge_frame_context(seqs)
-    pred_labels, pred_reasons, prob_incorrect_list, pred_reason_probs = [], [], [], []
+    pred_reasons, prob_incorrect_list, pred_reason_probs = [], [], []
     with torch.no_grad():
         for seq in seqs:
             x = torch.tensor([seq], dtype=torch.float32)
             logits_c, logits_r, _ = model(x, None)
             prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()[0]
             pred_r = logits_r.argmax(1).item()
-            pred_labels.append(1 if prob_c[1] >= thresh else 0)  # 1=incorrect
-            if args.reason_override and pred_r in INCORRECT_REASON_IDX:
-                pred_labels[-1] = 1  # 预测为错误类 reason 时强制 label=incorrect
             pred_reasons.append(pred_r)
             prob_incorrect_list.append(float(prob_c[1]))
             pred_reason_probs.append(torch.softmax(logits_r, dim=1).cpu().numpy()[0])
@@ -305,14 +303,44 @@ def main():
         sys.exit(1)
 
     gt_labels = np.array(gt_labels)
-    pred_labels = np.array(pred_labels)
     prob_incorrect = np.array(prob_incorrect_list)
     pred_probs = np.array(pred_reason_probs)
     gt_reasons_arr = np.array(gt_reasons)
+    pred_reasons_arr = np.array(pred_reasons)
     n_reasons = len(REASON_NAMES)
     y_bin = label_binarize(gt_reasons_arr, classes=range(n_reasons))
 
-    pred_reasons_arr = np.array(pred_reasons)
+    # 阈值：自动搜索最优 F1 或使用指定值
+    def _pred_at_thresh(prob: np.ndarray, reasons: np.ndarray, t: float) -> np.ndarray:
+        pred = (prob >= t).astype(np.int64)
+        if args.reason_override:
+            pred[(reasons == 3) | (reasons == 4) | (reasons == 5) | (reasons == 6)] = 1
+        return pred
+
+    best_thresh = args.incorrect_threshold
+    best_f1 = 0.0
+    best_p = best_r = 0.0
+    do_search = not args.no_threshold_search
+    if do_search:
+        for t in np.arange(0.05, 0.96, 0.05):
+            pred_b = _pred_at_thresh(prob_incorrect, pred_reasons_arr, t)
+            p, r, f1, _ = precision_recall_fscore_support(
+                gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0
+            )
+            if gt_labels.sum() > 0 and f1[1] > best_f1:
+                best_f1 = f1[1]
+                best_thresh = t
+                best_p, best_r = p[1], r[1]
+    else:
+        pred_b = _pred_at_thresh(prob_incorrect, pred_reasons_arr, args.incorrect_threshold)
+        p, r, f1, _ = precision_recall_fscore_support(
+            gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0
+        )
+        best_thresh = args.incorrect_threshold
+        best_p, best_r, best_f1 = p[1], r[1], f1[1]
+
+    pred_labels = _pred_at_thresh(prob_incorrect, pred_reasons_arr, best_thresh)
+    print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  P={best_p:.4f}  R={best_r:.4f}  F1={best_f1:.4f}")
     # 每类 P, R, mAP50, mAP50-95
     p_per, r_per, _, support = precision_recall_fscore_support(
         gt_reasons_arr, pred_reasons_arr, labels=range(n_reasons),
