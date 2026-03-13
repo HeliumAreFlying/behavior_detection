@@ -1,6 +1,6 @@
 """
 在渲染图像序列上运行 YOLO 检测 + 跟踪，按 episode 分组，输出每蛇时序特征与行为标签。
-用于后续 LSTM 行为/正确性模型训练。
+仅依赖 dataset（含 metadata.json、train/val 的 images/labels/behavior），无需 batches。
 
 依赖: pip install ultralytics
 用法:
@@ -15,59 +15,42 @@ from collections import defaultdict
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-# 与 render_and_export 一致
-GRID_W = 15
-GRID_H = 15
-CELL_SIZE = 40
-IMG_W = GRID_W * CELL_SIZE
-IMG_H = GRID_H * CELL_SIZE
-
-CLASS_NAMES = ["snake_head", "snake_body", "food", "x2"]
 CLASS_HEAD = 0
 
 
-def yolo_center_to_grid(xc: float, yc: float) -> tuple[int, int]:
-    """YOLO 归一化中心 -> 网格坐标"""
-    gx = int(xc * GRID_W)
-    gy = int(yc * GRID_H)
-    return max(0, min(gx, GRID_W - 1)), max(0, min(gy, GRID_H - 1))
+def _gt_heads_from_labels(lbl_path: Path) -> list[tuple[float, float]]:
+    """从 YOLO label 文件读取蛇头位置 (class=0)，返回 [(xc, yc), ...] 归一化坐标，按蛇顺序"""
+    if not lbl_path.exists():
+        return []
+    gt: list[tuple[float, float]] = []
+    for line in lbl_path.read_text(encoding="utf-8").strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and int(parts[0]) == CLASS_HEAD:
+            gt.append((float(parts[1]), float(parts[2])))
+    return gt
 
 
 def match_tracks_to_snakes(
     head_detections: list[tuple[int, float, float]],  # [(track_id, xc, yc), ...]
-    scene: dict,
+    gt_heads: list[tuple[float, float]],  # [(xc, yc), ...] 归一化坐标
 ) -> dict[int, int]:
     """首帧蛇头检测 track_id -> 蛇下标 snake_idx。按位置最近匹配。"""
-    snakes = scene.get("snakes", [])
-    if not snakes:
-        return {}
-
-    gt_heads: list[tuple[int, int]] = []
-    for s in snakes:
-        body = s.get("body", [])
-        if body:
-            gx, gy = int(body[0][0]) % GRID_W, int(body[0][1]) % GRID_H
-            gt_heads.append((gx, gy))
-
     if not head_detections or not gt_heads:
         return {}
 
     used_snake = set()
     track_to_snake: dict[int, int] = {}
 
-    def dist(tid: int, xc: float, yc: float, si: int) -> float:
-        gx, gy = yolo_center_to_grid(xc, yc)
-        tgx, tgy = gt_heads[si]
-        return (gx - tgx) ** 2 + (gy - tgy) ** 2
+    def dist(xc: float, yc: float, gxc: float, gyc: float) -> float:
+        return (xc - gxc) ** 2 + (yc - gyc) ** 2
 
-    # 贪心最近邻匹配
     sorted_dets = sorted(head_detections, key=lambda x: (x[1], x[2]))
     for track_id, xc, yc in sorted_dets:
         best_si, best_d = -1, float("inf")
         for si in range(len(gt_heads)):
             if si in used_snake:
                 continue
-            d = dist(track_id, xc, yc, si)
+            d = dist(xc, yc, gt_heads[si][0], gt_heads[si][1])
             if d < best_d:
                 best_d, best_si = d, si
         if best_si >= 0:
@@ -109,8 +92,8 @@ def main():
 
     p = argparse.ArgumentParser(description="YOLO 跟踪 + 序列准备")
     p.add_argument("--model", "-m", required=True, help="YOLO 权重路径，如 runs/detect/train/weights/best.pt")
-    p.add_argument("--dataset", "-d", default="dataset", help="数据集根目录（含 metadata.json）")
-    p.add_argument("--batches", "-b", default=None, help="batch 目录，默认 batches/")
+    p.add_argument("--dataset", "-d", default="dataset",
+                   help="数据集根目录（含 train/val/images, metadata.json），可写绝对或相对路径")
     p.add_argument("--output", "-o", default="sequences", help="输出目录")
     p.add_argument("--max-episodes", type=int, default=0, help="最多处理多少 episode，0 表示全部")
     p.add_argument("--device", default="", help="cuda:0 / cpu，默认自动")
@@ -119,14 +102,10 @@ def main():
     from ultralytics import YOLO
 
     dataset_dir = Path(args.dataset)
+    if not dataset_dir.is_absolute() and not dataset_dir.exists():
+        dataset_dir = ROOT / dataset_dir
     output_dir = Path(args.output)
-    batches_dir = Path(args.batches or ROOT / "batches")
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    if not batches_dir.exists():
-        print(f"batch 目录不存在: {batches_dir}")
-        print("请先运行 data_generator 生成 batch 文件，再运行 render_and_export。")
-        sys.exit(1)
 
     meta_path = dataset_dir / "metadata.json"
     if not meta_path.exists():
@@ -141,27 +120,6 @@ def main():
         by_episode[key].append(m)
     for key in by_episode:
         by_episode[key].sort(key=lambda x: x["scene"])
-
-    # 加载 batch JSON 缓存
-    batch_cache: dict[str, dict] = {}
-
-    def load_batch(batch_name: str) -> dict:
-        if batch_name not in batch_cache:
-            p = batches_dir / batch_name
-            if not p.exists():
-                return {}
-            batch_cache[batch_name] = json.loads(p.read_text(encoding="utf-8"))
-        return batch_cache[batch_name]
-
-    def get_scene(batch_name: str, ep_idx: int, sc_idx: int) -> dict | None:
-        data = load_batch(batch_name)
-        eps = data.get("episodes", [])
-        if ep_idx >= len(eps):
-            return None
-        scenes = eps[ep_idx].get("scenes", [])
-        if sc_idx >= len(scenes):
-            return None
-        return scenes[sc_idx]
 
     model = YOLO(args.model)
     device = args.device or ("cuda:0" if __import__("torch").cuda.is_available() else "cpu")
@@ -196,9 +154,11 @@ def main():
         )
         results_list = list(results)
 
-        # 首帧 scene 用于匹配 track -> snake
-        first_scene = get_scene(batch_name, ep_idx, entries[0]["scene"])
-        if not first_scene or not first_scene.get("snakes"):
+        # 首帧 label 文件提供 GT 蛇头位置，用于 track -> snake 匹配
+        first_entry = entries[0]
+        lbl_path = dataset_dir / first_entry["split"] / "labels" / f"{first_entry['id']}.txt"
+        gt_heads = _gt_heads_from_labels(lbl_path)
+        if not gt_heads:
             continue
 
         # 首帧蛇头检测
@@ -214,7 +174,7 @@ def main():
                 xc, yc = float(r0.boxes.xywhn[i][0]), float(r0.boxes.xywhn[i][1])
                 head_dets.append((tid, xc, yc))
 
-        track_to_snake = match_tracks_to_snakes(head_dets, first_scene)
+        track_to_snake = match_tracks_to_snakes(head_dets, gt_heads)
         snake_seqs = extract_head_features_per_frame(results_list, track_to_snake)
 
         # 每帧的 snake_annotations 来自 behavior JSON
