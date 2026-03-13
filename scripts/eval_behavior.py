@@ -186,6 +186,10 @@ def main():
     p.add_argument("--skip-n", type=int, default=5, help="batches 模式下 track 的跳帧数")
     p.add_argument("--no-velocity", action="store_true", help="track 数据不加速度特征")
     p.add_argument("--max-samples", type=int, default=0, help="最多评估样本数，0=全部")
+    p.add_argument("--incorrect-threshold", type=float, default=0.5,
+                   help="预测 incorrect 的阈值，P(incorrect)>=此值则判为错误。降低可提升 recall，如 0.3")
+    p.add_argument("--reason-override", action="store_true",
+                   help="若预测 reason 为错误类(self_collision/snake_collision/x2_wasted/timeout)，强制 label=incorrect")
     args = p.parse_args()
 
     model_path = Path(args.model)
@@ -241,14 +245,20 @@ def main():
         seqs, gt_labels, gt_reasons = seqs[: args.max_samples], gt_labels[: args.max_samples], gt_reasons[: args.max_samples]
     print(f"共 {len(seqs)} 条样本")
 
-    # 推理
+    # 推理（支持 incorrect 阈值以平衡 precision/recall）
+    thresh = args.incorrect_threshold
+    INCORRECT_REASON_IDX = {3, 4, 5, 6}  # self_collision, snake_collision, x2_wasted, timeout
     pred_labels, pred_reasons, pred_reason_probs = [], [], []
     with torch.no_grad():
         for seq in seqs:
             x = torch.tensor([seq], dtype=torch.float32)
             logits_c, logits_r, _ = model(x, None)
-            pred_labels.append(logits_c.argmax(1).item())
-            pred_reasons.append(logits_r.argmax(1).item())
+            prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()[0]
+            pred_r = logits_r.argmax(1).item()
+            pred_labels.append(1 if prob_c[1] >= thresh else 0)  # 1=incorrect
+            if args.reason_override and pred_r in INCORRECT_REASON_IDX:
+                pred_labels[-1] = 1  # 预测为错误类 reason 时强制 label=incorrect
+            pred_reasons.append(pred_r)
             pred_reason_probs.append(torch.softmax(logits_r, dim=1).cpu().numpy()[0])
 
     # 计算指标

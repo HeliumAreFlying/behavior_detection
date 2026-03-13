@@ -151,6 +151,13 @@
    - 模型：在行为特征上接分类头，或规则 + 轻量模型
 ```
 
+### 4.1 错误检测率提升（已实现）
+
+当 incorrect 类召回率较低时，可使用：
+
+- **训练**：`--boost-incorrect`（启用 Focal Loss、类别权重、过采样、incorrect 2× 权重）
+- **推理/评估**：`--incorrect-threshold 0.3`（降低判定阈值）、`--reason-override`（reason 为错误类时强制 incorrect）
+
 ---
 
 ## 五、是否要丰富游戏规则？

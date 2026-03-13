@@ -96,18 +96,22 @@ batch JSON 结构（支持多蛇）：
 ### 1. 生成数据
 
 ```bash
-# 默认：1000 个 batch，每 batch 100 局，输出到 batches/
+# 默认：10 个 batch，每 batch 10 局，输出到 batches/
 python data_generator.py
 
-# 自定义参数
+# 自定义参数（支持多进程加速）
 python data_generator.py --batches 100 --batch-size 100 --output my_data --mistake-rate 0.2
+
+# 使用 8 个进程并行生成
+python data_generator.py -b 100 -s 100 -w 8
 ```
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
-| `-b, --batches` | 1000 | batch 数量 |
-| `-s, --batch-size` | 100 | 每 batch 局数 |
+| `-b, --batches` | 10 | batch 数量 |
+| `-s, --batch-size` | 10 | 每 batch 局数 |
 | `-o, --output` | batches | 输出目录 |
+| `-w, --workers` | CPU 核心数 | 并行进程数 |
 | `-m, --mistake-rate` | 0.15 | AI 犯错概率（先吃食物浪费 x2） |
 | `-f, --max-foods` | 12 | 每局需吃完的食物波数 |
 
@@ -119,24 +123,24 @@ python data_generator.py --batches 100 --batch-size 100 --output my_data --mista
 # 1. 数据生成
 python data_generator.py --batches 10 --batch-size 100
 
-# 2. 渲染与导出 YOLO 数据集
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5
+# 2. 渲染与导出 YOLO 数据集（-w 8 可多进程加速）
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5 -w 8
 
 # 3. (可选) YOLO 训练（检测 snake_head/body, food, x2）
 yolo train model=yolov26n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 
-# 4. 序列准备（二选一）
+# 4. 序列准备（二选一，-w 可多进程）
 # 路径 A：纯 label，无需 YOLO
-python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
 
-# 路径 B：YOLO 跟踪（需先完成步骤 3）
+# 路径 B：YOLO 跟踪（需先完成步骤 3，GPU 时默认单进程）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（推荐启用增强）
+# 5. 行为模型训练（错误检测率低时可加 --boost-incorrect）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
-  --class-weights --oversample --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
+  --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 100
 
-# 6. 评估
+# 6. 评估（可调 --incorrect-threshold 0.3 提升错误召回率）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
 # 7. 演示视频（路径 B 可加 -m YOLO权重 --draw-boxes）
@@ -160,7 +164,8 @@ python replay_ui.py
 ### 3. 渲染与导出 YOLO 数据集
 
 ```bash
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5
+# 多进程加速：-w 8
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5 -w 8
 ```
 
 输出 `dataset/train`, `dataset/val`（images + labels + metadata.json）。
@@ -168,10 +173,10 @@ python scripts/render_and_export.py --batches batches/ --output dataset --val-ra
 ### 4. 序列准备（二选一）
 
 ```bash
-# 纯 label：直接从 YOLO label 提取蛇头，无需运行 YOLO
-python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
+# 纯 label：直接从 YOLO label 提取蛇头，无需运行 YOLO（-w 8 多进程）
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
 
-# YOLO 跟踪：需先训练 YOLO，再跑 track
+# YOLO 跟踪：需先训练 YOLO，再跑 track（GPU 时默认单进程）
 python scripts/run_track_and_prepare.py -m yolov8n.pt -d dataset -o sequences
 ```
 
@@ -181,8 +186,8 @@ python scripts/run_track_and_prepare.py -m yolov8n.pt -d dataset -o sequences
 # 纯网格（推荐先验证）
 python scripts/train_behavior.py --data grid --batches batches/ -o checkpoints/behavior
 
-# 序列数据
-python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior
+# 序列数据（错误检测率低时加 --boost-incorrect）
+python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior --boost-incorrect
 ```
 
 ### 6. 实战演示视频
@@ -200,6 +205,9 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c c
 ```bash
 # 从 track_sequences（推荐，与训练格式一致）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
+
+# 提升错误召回率：降低阈值或启用 reason-override
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --incorrect-threshold 0.3 --reason-override
 
 # 从 batches
 python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset

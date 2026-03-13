@@ -26,6 +26,8 @@ def main():
                    help="track_sequences.json 或 grid")
     p.add_argument("--batches", default="batches", help="--data grid 时的 batch 目录")
     p.add_argument("--limit", type=int, default=0, help="最多预测条数，0=全部")
+    p.add_argument("--incorrect-threshold", type=float, default=0.5,
+                   help="P(incorrect)>=此值则判为错误，降低可提升错误召回率")
     args = p.parse_args()
 
     ckpt = torch.load(args.model, map_location="cpu", weights_only=False)
@@ -48,17 +50,18 @@ def main():
         batches_dir = Path(args.batches)
         if not batches_dir.is_absolute():
             batches_dir = ROOT / batches_dir
-        samples = load_grid_sequences(batches_dir)
+        samples, _ = load_grid_sequences(batches_dir)
     else:
         from train_behavior import load_track_sequences
         data_path = Path(args.data)
         if not data_path.is_absolute():
             data_path = ROOT / data_path
-        samples = load_track_sequences(data_path)
+        samples, _ = load_track_sequences(data_path, add_velocity=True)
 
     if args.limit > 0:
         samples = samples[: args.limit]
 
+    thresh = args.incorrect_threshold
     correct_pred = 0
     total = 0
     with torch.no_grad():
@@ -67,7 +70,8 @@ def main():
             x = torch.tensor([seq], dtype=torch.float32)
             lengths = torch.tensor([len(seq)], dtype=torch.long)
             logits_c, logits_r, _ = model(x, lengths)
-            pred_c = logits_c.argmax(1).item()
+            prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()[0]
+            pred_c = 1 if prob_c[1] >= thresh else 0
             pred_r = logits_r.argmax(1).item()
             label_pred = "incorrect" if pred_c == 1 else "correct"
             reason_pred = REASON_NAMES[pred_r]

@@ -189,8 +189,16 @@ def main():
     # 类别不平衡与增强
     p.add_argument("--class-weights", action="store_true",
                    help="使用类别权重（逆频率）缓解不平衡")
+    p.add_argument("--incorrect-weight", type=float, default=0.0,
+                   help="incorrect 类额外权重倍数，如 2.0 表示 incorrect 权重 x2（用于提升错误检测率）")
+    p.add_argument("--focal-loss", action="store_true",
+                   help="对 correct/incorrect 使用 Focal Loss，聚焦难分样本")
+    p.add_argument("--focal-gamma", type=float, default=2.0,
+                   help="Focal Loss 的 gamma 参数，越大越关注难样本")
     p.add_argument("--oversample", action="store_true",
                    help="过采样少数类，使用 WeightedRandomSampler")
+    p.add_argument("--boost-incorrect", action="store_true",
+                   help="一键启用: class-weights + oversample + focal-loss + incorrect-weight=2，提升错误检测率")
     p.add_argument("--aug-frame-drop", type=float, default=0.0,
                    help="训练时随机丢帧概率 (0=关闭)")
     p.add_argument("--aug-noise", type=float, default=0.0,
@@ -198,6 +206,12 @@ def main():
     p.add_argument("--aug-multiscale", action="store_true",
                    help="多尺度时间：随机取 1/2/3 倍采样子序列")
     args = p.parse_args()
+    if args.boost_incorrect:
+        args.class_weights = True
+        args.oversample = True
+        args.focal_loss = True
+        args.incorrect_weight = args.incorrect_weight or 2.0
+        print("已启用 --boost-incorrect: class-weights + oversample + focal-loss + incorrect-weight=2")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -248,15 +262,24 @@ def main():
     label_counts = np.maximum(label_counts, 1)
     label_weights = 1.0 / np.sqrt(label_counts)
     label_weights = label_weights / label_weights.sum() * 2
+    if args.incorrect_weight > 0:
+        label_weights[1] *= args.incorrect_weight  # index 1 = incorrect
+        label_weights = label_weights / label_weights.sum() * 2
+        print(f"incorrect 额外权重: x{args.incorrect_weight} -> label_weights={label_weights.tolist()}")
     if args.class_weights:
         print(f"类别权重: label={label_weights.tolist()}, reason(前3)={reason_weights[:3].tolist()}...")
+    if args.focal_loss:
+        print(f"Focal Loss: gamma={args.focal_gamma} (聚焦难分样本)")
 
-    # 过采样：按 reason 逆频率赋权，少数类被采样更多
+    # 过采样：按 reason 逆频率赋权，incorrect 额外加权
     def _sample_weights(data):
         reason_ct = np.bincount([s[2] for s in data if s[3] > 0.5], minlength=NUM_REASONS)
         reason_ct = np.maximum(reason_ct, 1)
         inv = 1.0 / np.sqrt(reason_ct)
-        return [inv[s[2]] if s[3] > 0.5 else inv.mean() for s in data]
+        weights = [inv[s[2]] if s[3] > 0.5 else inv.mean() for s in data]
+        if args.incorrect_weight > 0:
+            weights = [w * (args.incorrect_weight if s[1] == 1 else 1.0) for w, s in zip(weights, data)]
+        return weights
 
     class SeqDataset(Dataset):
         def __init__(self, data, augment=False):
@@ -333,8 +356,18 @@ def main():
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=25, verbose=True)
+
+    def _focal_loss(logits, targets, gamma, weight=None):
+        ce = nn.functional.cross_entropy(logits, targets, reduction="none")
+        pt = torch.exp(-ce)
+        focal = ((1 - pt) ** gamma) * ce
+        if weight is not None:
+            alpha_t = weight[targets]
+            focal = alpha_t * focal
+        return focal.mean()
+
     ce_kw = {"label_smoothing": args.label_smoothing}
-    if args.class_weights:
+    if args.class_weights or args.incorrect_weight > 0:
         ce_kw["weight"] = torch.tensor(label_weights, dtype=torch.float32).to(device)
     ce_label = nn.CrossEntropyLoss(**ce_kw)
     ce_kw_reason = {"label_smoothing": args.label_smoothing}
@@ -367,7 +400,15 @@ def main():
             loss_ep = bce(logits_ep, y_ep) if logits_ep is not None else x.new_zeros(1)
             mask = (y_ep > 0.5).squeeze(1)
             if mask.any():
-                loss_c = ce_label(logits_c[mask], y_label[mask])
+                lc = logits_c[mask]
+                yl = y_label[mask]
+                if args.focal_loss:
+                    loss_c = _focal_loss(
+                        lc, yl, args.focal_gamma,
+                        ce_kw.get("weight"),
+                    )
+                else:
+                    loss_c = ce_label(lc, yl)
                 loss_r = ce_reason(logits_r[mask], y_reason[mask])
                 loss = loss_ep + 0.5 * (loss_c + loss_r)
                 train_correct += (logits_c[mask].argmax(1) == y_label[mask]).sum().item()
