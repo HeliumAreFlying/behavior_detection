@@ -44,7 +44,7 @@ flowchart TB
 每帧每蛇基础特征：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2]`
 
 - `ate_food` / `ate_x2`：由连续帧 head/food/x2 位置推导，YOLO 推理时同样可计算
-- 训练时默认将**前后 3 帧 + 当前帧**合并为 1 帧输入（7×14=98 维）
+- 训练时默认将**前后共 3 帧**（1 前 + 当前 + 1 后）合并为 1 帧输入（3×14=42 维）
 
 ---
 

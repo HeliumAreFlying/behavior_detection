@@ -204,9 +204,9 @@ def main():
     p.add_argument("--dropout", type=float, default=0.3, help="LSTM dropout")
     p.add_argument("--label-smoothing", type=float, default=0.1, help="CE label smoothing")
     p.add_argument("--input-dim", type=int, default=0,
-                   help="0=自动: track 用 14*7=98（含 7 帧上下文），grid 用 8")
-    p.add_argument("--frame-context", type=int, default=7,
-                   help="前后帧合并数：3 前 + 当前 + 3 后 = 7。1 表示不合并")
+                   help="0=自动: 14*frame_context，默认 14*3=42")
+    p.add_argument("--frame-context", type=int, default=3,
+                   help="前后帧合并数：1 前 + 当前 + 1 后 = 3。1 表示不合并")
     p.add_argument("--val-ratio", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-velocity", action="store_true",
@@ -246,7 +246,7 @@ def main():
 
     frame_ctx = max(1, args.frame_context)
     if frame_ctx % 2 == 0:
-        frame_ctx += 1  # 确保奇数：3+1+3
+        frame_ctx += 1  # 确保奇数：half 前 + 当前 + half 后
     half = frame_ctx // 2
 
     if args.data.lower() == "grid":

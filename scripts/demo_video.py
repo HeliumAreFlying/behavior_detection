@@ -225,7 +225,7 @@ def main():
         print(f"行为模型 input_dim={input_dim}, 全帧 {len(scene_features)} 帧")
     snake_seqs = _build_seq_features(scene_features_for_model, 14)
 
-    def _merge_frame_context(seq: list[list[float]], base: int = 14, half: int = 3) -> list[list[float]]:
+    def _merge_frame_context(seq: list[list[float]], base: int = 14, half: int = 1) -> list[list[float]]:
         if half <= 0:
             return seq
         n = len(seq)
