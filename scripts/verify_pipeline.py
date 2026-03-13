@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from run_track_and_prepare import extract_sequences_from_labels
-from render_and_export import is_key_frame
 
 
 def main():
@@ -23,7 +22,6 @@ def main():
     p.add_argument("--batch", "-b", required=True, help="batch JSON")
     p.add_argument("--episode", "-e", type=int, default=0)
     p.add_argument("--dataset", "-d", default="dataset", help="render_and_export 输出的 dataset 目录")
-    p.add_argument("--skip-n", type=int, default=5)
     args = p.parse_args()
 
     batch_path = Path(args.batch)
@@ -59,24 +57,16 @@ def main():
     # 从 dataset 提取的特征（与 run_track_and_prepare 一致）
     label_seqs = extract_sequences_from_labels(entries, dataset_dir)
 
-    # 模拟 render_and_export 的帧筛选
-    skip_n = max(1, args.skip_n)
-    expected_scene_indices = []
-    for sc_idx, sc in enumerate(scenes):
-        prev = scenes[sc_idx - 1] if sc_idx > 0 else None
-        is_last = sc_idx == len(scenes) - 1
-        key = is_key_frame(sc, prev, is_last, ep_reason)
-        if key or skip_n <= 1 or (sc_idx % skip_n == 0):
-            expected_scene_indices.append(sc_idx)
+    # render_and_export 不跳帧，导出全帧
+    expected_scene_indices = list(range(len(scenes)))
 
     print(f"batch={batch_name} episode={args.episode}")
     print(f"  scenes 总数: {len(scenes)}")
     print(f"  dataset entries 数: {len(entries)} (应等于 render 导出帧数)")
-    print(f"  skip_n={skip_n} 下期望导出的 scene 索引数: {len(expected_scene_indices)}")
 
     if len(entries) != len(expected_scene_indices):
         print(f"  [WARN] 不一致! entries={len(entries)} vs 期望={len(expected_scene_indices)}")
-        print("  可能原因: render_and_export 使用了不同的 --skip-n 或随机 train/val 导致 metadata 不包含所有导出帧")
+        print("  可能原因: render_and_export 与 metadata 帧数不一致")
     else:
         print("  [OK] 帧数一致")
 
@@ -97,7 +87,7 @@ def main():
         if sc_idx >= len(scenes):
             break
         filtered_sf.append(_scene_to_features(scenes[sc_idx]))
-    demo_seqs = _build_seq_features(filtered_sf, input_dim=12)
+    demo_seqs = _build_seq_features(filtered_sf, input_dim=14)
 
     for si in sorted(set(label_seqs.keys()) | set(demo_seqs.keys())):
         label_seq = label_seqs.get(si, [])

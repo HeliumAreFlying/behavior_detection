@@ -54,12 +54,26 @@ def _scene_to_features(scene: dict) -> dict[int, dict]:
     return out
 
 
-def _build_seq_features(scene_features: list[dict[int, dict]], input_dim: int = 12) -> dict[int, list[list[float]]]:
-    """
-    从 scene 构建特征序列，与训练时格式一致。
-    input_dim=8: grid 格式 [head_x, head_y, food_x, food_y, x2_x, x2_y, x2_active, score_norm]
-    input_dim=12: track 格式 [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food]
-    """
+def _infer_ate_from_scene(prev: dict | None, curr: dict) -> tuple[float, float]:
+    if prev is None:
+        return 0.0, 0.0
+    xc, yc = curr["xc"], curr["yc"]
+    thresh = 0.02
+    def _d(ax, ay, bx, by): return (ax - bx) ** 2 + (ay - by) ** 2
+    ate_food = 0.0
+    pfx, pfy, fx, fy = prev["fx"], prev["fy"], curr["fx"], curr["fy"]
+    if (pfx or pfy) and _d(fx, fy, pfx, pfy) > thresh and _d(xc, yc, pfx, pfy) < thresh:
+        ate_food = 1.0
+    ate_x2 = 0.0
+    if prev.get("has_x2") and (not curr.get("has_x2") or _d(curr["xx"], curr["xy"], prev["xx"], prev["xy"]) > thresh):
+        pxx, pxy = prev["xx"], prev["xy"]
+        if (pxx or pxy) and _d(xc, yc, pxx, pxy) < thresh:
+            ate_x2 = 1.0
+    return ate_food, ate_x2
+
+
+def _build_seq_features(scene_features: list[dict[int, dict]], input_dim: int = 14) -> dict[int, list[list[float]]]:
+    """构建 14 维特征（与 YOLO 路径一致，仅用可检测的 head/food/x2）。"""
     snake_seqs: dict[int, list[list[float]]] = {}
     num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
     for si in range(num_snakes):
@@ -72,24 +86,19 @@ def _build_seq_features(scene_features: list[dict[int, dict]], input_dim: int = 
             fx, fy = f["fx"], f["fy"]
             xx, xy = f["xx"], f["xy"]
             has_x2 = f["has_x2"]
-            x2_active = f.get("x2_active", False)
-            score = f.get("score", 0)
-
-            if input_dim == 8:
-                feat = [xc, yc, fx, fy, xx, xy, 1.0 if x2_active else 0.0, min(score / 24.0, 1.0)]
+            prev_f = scene_features[t - 1][si] if t > 0 and si in scene_features[t - 1] else None
+            ate_food, ate_x2 = _infer_ate_from_scene(prev_f, f)
+            if t > 0 and si in scene_features[t - 1]:
+                prev = scene_features[t - 1][si]
+                dx, dy = xc - prev["xc"], yc - prev["yc"]
             else:
-                if t > 0 and si in scene_features[t - 1]:
-                    prev = scene_features[t - 1][si]
-                    dx = xc - prev["xc"]
-                    dy = yc - prev["yc"]
-                else:
-                    dx, dy = 0.0, 0.0
-                df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
-                dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
-                vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
-                to_food = (fx - xc) * dx + (fy - yc) * dy
-                move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-                feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food]
+                dx, dy = 0.0, 0.0
+            df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
+            dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
+            vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
+            to_food = (fx - xc) * dx + (fy - yc) * dy
+            move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
+            feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2]
             seq.append(feat)
         if len(seq) >= 2:
             snake_seqs[si] = seq
@@ -110,8 +119,6 @@ def main():
     p.add_argument("--fps", type=int, default=8, help="视频帧率")
     p.add_argument("--draw-boxes", action="store_true", help="绘制 YOLO 检测框")
     p.add_argument("--label-only", action="store_true", help="仅按 correct/incorrect 判定一致，不要求 reason 相同")
-    p.add_argument("--skip-n", type=int, default=5,
-                   help="track 格式下与 render_and_export 一致的跳帧数（--dataset 未指定时生效）")
     p.add_argument("--dataset", "-d", default="",
                    help="dataset 目录；指定后从 metadata 读取实际导出帧，保证与训练完全一致")
     args = p.parse_args()
@@ -123,7 +130,7 @@ def main():
         print(f"请安装依赖: pip install pygame opencv-python\n{e}")
         sys.exit(1)
 
-    from render_and_export import render_scene, is_key_frame, scene_to_bboxes
+    from render_and_export import render_scene, scene_to_bboxes
     from models.behavior_correctness import BehaviorCorrectnessModel, REASON_NAMES
     from replay_ui import REASON_NAMES as REASON_ZH
 
@@ -194,9 +201,8 @@ def main():
     beh_model.load_state_dict(state)
     beh_model.eval()
 
-    # 用 scene 构建序列，格式与训练时一致
-    # track 格式：必须与 render_and_export 帧采样一致，否则训练/推理数据分布不同
-    if input_dim == 12:
+    # 用 scene 构建序列，特征统一 14 维（YOLO 可检测的 head/food/x2 及推导特征）
+    if input_dim >= 14:
         dataset_dir = Path(args.dataset) if args.dataset else (ROOT / "dataset")
         if not dataset_dir.is_absolute():
             dataset_dir = ROOT / dataset_dir
@@ -209,25 +215,29 @@ def main():
             scene_indices = [e["scene"] for e in entries]
             if scene_indices:
                 scene_features_for_model = [_scene_to_features(scenes[i]) for i in scene_indices if i < len(scenes)]
-                print(f"行为模型 input_dim=12 (track), 从 dataset metadata 读取 {len(scene_features_for_model)} 帧")
+                print(f"行为模型 input_dim={input_dim} (track), 从 dataset metadata 读取 {len(scene_features_for_model)} 帧")
                 use_metadata = True
         if not use_metadata:
-            ep_reason = ep.get("reason", "")
-            skip_n = max(1, args.skip_n)
-            filtered_scenes = []
-            for sc_idx, sc in enumerate(scenes):
-                prev = scenes[sc_idx - 1] if sc_idx > 0 else None
-                is_last = sc_idx == len(scenes) - 1
-                key = is_key_frame(sc, prev, is_last, ep_reason)
-                if key or skip_n <= 1 or (sc_idx % skip_n == 0):
-                    filtered_scenes.append(_scene_to_features(sc))
-            scene_features_for_model = filtered_scenes
-            hint = " (建议 -d dataset 从 metadata 读取实际帧)" if not args.dataset else ""
-            print(f"行为模型 input_dim=12 (track), 帧采样 skip_n={skip_n}, {len(filtered_scenes)}/{len(scenes)} 帧{hint}")
+            scene_features_for_model = scene_features
+            print(f"行为模型 input_dim={input_dim} (track), 全帧 {len(scene_features_for_model)} 帧 (建议 -d dataset 与训练一致)")
     else:
         scene_features_for_model = scene_features
-        print(f"行为模型 input_dim=8 (grid), 全帧 {len(scene_features)} 帧")
-    snake_seqs = _build_seq_features(scene_features_for_model, input_dim)
+        print(f"行为模型 input_dim={input_dim}, 全帧 {len(scene_features)} 帧")
+    snake_seqs = _build_seq_features(scene_features_for_model, 14)
+
+    def _merge_frame_context(seq: list[list[float]], base: int = 14, half: int = 3) -> list[list[float]]:
+        if half <= 0:
+            return seq
+        n = len(seq)
+        return [
+            sum((seq[max(0, min(n - 1, i + j))] for j in range(-half, half + 1)), [])
+            for i in range(n)
+        ]
+
+    frame_ctx = input_dim // 14 if input_dim >= 14 and input_dim % 14 == 0 else 1
+    half = frame_ctx // 2
+    if half > 0:
+        snake_seqs = {si: _merge_frame_context(seq, 14, half) for si, seq in snake_seqs.items()}
 
     # 对每条蛇跑行为模型，取每个端点的预测
     snake_preds: dict[int, list[tuple[int, str, str, float]]] = defaultdict(list)

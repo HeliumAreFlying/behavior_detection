@@ -37,9 +37,14 @@ flowchart TB
 | 5. 行为训练 | `train_behavior.py` | sequences 或 grid batches | `checkpoints/behavior/best.pt` |
 | 6. 视频演示 | `demo_video.py` | batch + 模型权重 | 带标注的 MP4 视频 |
 
-### 12 维特征（行为模型输入）
+### 14 维基础特征 + 7 帧上下文（行为模型输入）
 
-每帧每蛇提取：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food]`
+**特征约束**：仅使用 YOLO 能从图像检测到的信息（head/food/x2 位置），grid 与 track 两种路径完全一致。
+
+每帧每蛇基础特征：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2]`
+
+- `ate_food` / `ate_x2`：由连续帧 head/food/x2 位置推导，YOLO 推理时同样可计算
+- 训练时默认将**前后 3 帧 + 当前帧**合并为 1 帧输入（7×14=98 维）
 
 ---
 
@@ -123,8 +128,8 @@ python data_generator.py -b 100 -s 100 -w 8
 # 1. 数据生成
 python data_generator.py --batches 10 --batch-size 100
 
-# 2. 渲染与导出 YOLO 数据集（-w 8 可多进程加速）
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5 -w 8
+# 2. 渲染与导出 YOLO 数据集（全帧导出，不跳帧；-w 8 可多进程）
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 
 # 3. (可选) YOLO 训练（检测 snake_head/body, food, x2）
 yolo train model=yolov26n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
@@ -164,8 +169,8 @@ python replay_ui.py
 ### 3. 渲染与导出 YOLO 数据集
 
 ```bash
-# 多进程加速：-w 8
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5 -w 8
+# 全帧导出（不跳帧），多进程加速：-w 8
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 ```
 
 输出 `dataset/train`, `dataset/val`（images + labels + metadata.json）。

@@ -21,8 +21,8 @@
 # 1. 数据生成（-w 8 多进程）
 python data_generator.py --batches 10 --batch-size 100 -w 8
 
-# 2. 渲染与导出 YOLO 数据集（-w 8 多进程）
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5 -w 8
+# 2. 渲染与导出 YOLO 数据集（全帧，不跳帧；-w 8 多进程）
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 
 # 3. (可选) YOLO 训练（检测 snake_head/body, food, x2）
 yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=600 batch=64
@@ -59,7 +59,7 @@ python data_generator.py -b 100 -s 100 -w 8
 ## 2. 渲染与导出（支持多进程 `-w`）
 
 ```bash
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 --skip-n 5
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2
 
 # 多进程加速
 python scripts/render_and_export.py --batches batches/ -o dataset -w 8
@@ -132,8 +132,8 @@ python scripts/infer_behavior.py -m checkpoints/behavior/best.pt -d grid --batch
 # 推荐：指定 dataset，从 metadata 读取实际导出帧，与训练 100% 一致
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c best.pt -d dataset -o demo.mp4
 
-# 无 dataset 时用 --skip-n 模拟（需与 render 参数一致）
-python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c best.pt -o demo.mp4 --skip-n 5
+# 无 dataset 时用全帧（与 render 一致，不跳帧）
+python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c best.pt -o demo.mp4
 
 # YOLO 框 + 行为标注
 python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c best.pt -d dataset -o demo.mp4 --draw-boxes

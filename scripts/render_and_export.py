@@ -221,13 +221,11 @@ def main():
     p.add_argument("--batches", "-b", default=None, help="batch 目录，默认 batches/")
     p.add_argument("--output", "-o", default="dataset", help="输出根目录")
     p.add_argument("--val-ratio", type=float, default=0.2, help="验证集比例")
-    p.add_argument("--skip-n", type=int, default=5, help="非关键帧每 N 帧采样 1 帧，1 表示不跳帧")
     p.add_argument("--workers", "-w", type=int, default=None, help="并行进程数，默认 CPU 核心数")
     args = p.parse_args()
 
     batches_dir = Path(args.batches or ROOT / "batches")
     output_dir = Path(args.output or ROOT / "dataset")
-    skip_n = max(1, args.skip_n)  # 0 表示不跳帧
     batch_files = sorted(batches_dir.glob("batch_*.json"))
     if not batch_files:
         print(f"未找到 batch 文件: {batches_dir}/batch_*.json")
@@ -251,11 +249,7 @@ def main():
             for sc_idx, scene in enumerate(scenes):
                 if not scene.get("snakes"):
                     continue
-                prev = scenes[sc_idx - 1] if sc_idx > 0 else None
-                is_last = sc_idx == len(scenes) - 1
-                key = is_key_frame(scene, prev, is_last, ep_reason)
-                if key or (skip_n <= 1) or (sc_idx % skip_n == 0):
-                    all_samples.append((scene, ep_idx, sc_idx, bf.name))
+                all_samples.append((scene, ep_idx, sc_idx, bf.name))
 
     n = len(all_samples)
     workers = min(args.workers or (mp.cpu_count() or 4), n)  # 不超过任务数
@@ -334,7 +328,7 @@ names: {CLASS_NAMES}
         json.dumps(metadata_list, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    print(f"完成: train {train_n}, val {val_n}, 总计 {n} (跳帧 skip_n={skip_n}, 进程数 {workers})")
+    print(f"完成: train {train_n}, val {val_n}, 总计 {n} (进程数 {workers})")
     print(f"输出: {output_dir}")
     print(f"配置: {output_dir / 'data.yaml'}")
 

@@ -130,23 +130,52 @@ def extract_head_features_per_frame(
     return dict(snake_seqs)
 
 
+def _infer_ate_events(
+    prev: tuple[float, float, float, float, float, float, float] | None,
+    curr: tuple[float, float, float, float, float, float, float],
+) -> tuple[float, float]:
+    """根据前后帧推断本帧是否刚吃到食物/x2。返回 (ate_food, ate_x2)。"""
+    if prev is None:
+        return 0.0, 0.0
+    hx, hy, fx, fy, xx, xy, has_x2 = curr
+    px, py, pfx, pfy, pxx, pxy, phx2 = prev
+    thresh = 0.02  # 归一化坐标下距离阈值
+    def _dist(ax, ay, bx, by) -> float:
+        return (ax - bx) ** 2 + (ay - by) ** 2
+    ate_food = 0.0
+    if (pfx or pfy) and _dist(fx, fy, pfx, pfy) > thresh:  # 食物位置变化
+        if _dist(hx, hy, pfx, pfy) < thresh:  # 蛇头在上一帧食物位置
+            ate_food = 1.0
+    ate_x2 = 0.0
+    if phx2 and (not has_x2 or _dist(xx, xy, pxx, pxy) > thresh):  # x2 消失或位移
+        if (pxx or pxy) and _dist(hx, hy, pxx, pxy) < thresh:  # 蛇头在上一帧 x2 位置
+            ate_x2 = 1.0
+    return ate_food, ate_x2
+
+
 def extract_sequences_from_labels(
     entries: list[dict], dataset_dir: Path
 ) -> dict[int, list[dict]]:
     """
-    从 label 文件读取每蛇每帧特征: head, food, x2。
-    返回: snake_idx -> [{"xc", "yc", "fx", "fy", "xx", "xy", "has_x2", "t"}, ...]
+    从 label 文件读取每蛇每帧特征: head, food, x2, ate_food, ate_x2。
+    返回: snake_idx -> [{"xc", "yc", "fx", "fy", "xx", "xy", "has_x2", "ate_food", "ate_x2", "t"}, ...]
     """
     snake_seqs: dict[int, list[dict]] = defaultdict(list)
+    prev_rows: list[tuple[float, ...]] | None = None
     for t, e in enumerate(entries):
         lbl_path = dataset_dir / e["split"] / "labels" / f"{e['id']}.txt"
         rows = _parse_label_per_snake(lbl_path)
-        for si, (hx, hy, fx, fy, xx, xy, has_x2) in enumerate(rows):
+        for si, curr in enumerate(rows):
+            hx, hy, fx, fy, xx, xy, has_x2 = curr
+            prev = prev_rows[si] if prev_rows and si < len(prev_rows) else None
+            ate_food, ate_x2 = _infer_ate_events(prev, curr)
             snake_seqs[si].append({
                 "xc": hx, "yc": hy,
                 "fx": fx, "fy": fy, "xx": xx, "xy": xy, "has_x2": has_x2,
+                "ate_food": ate_food, "ate_x2": ate_x2,
                 "t": t,
             })
+        prev_rows = rows
     return dict(snake_seqs)
 
 

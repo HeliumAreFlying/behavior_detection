@@ -60,6 +60,8 @@ def load_track_sequences(
             xx = f.get("xx", 0.0)
             xy = f.get("xy", 0.0)
             has_x2 = f.get("has_x2", 0.0)
+            ate_food = f.get("ate_food", 0.0)
+            ate_x2 = f.get("ate_x2", 0.0)
             if add_velocity and i > 0:
                 dx = xc - feats[i - 1]["xc"]
                 dy = yc - feats[i - 1]["yc"]
@@ -73,8 +75,8 @@ def load_track_sequences(
             vel_norm = (dx * dx + dy * dy) ** 0.5 or 1e-6
             to_food = (fx - xc) * dx + (fy - yc) * dy
             move_to_food = max(-1, min(1, to_food / vel_norm)) if (fx or fy) else 0.0
-            # 12 dims: head, vel, food, x2, has_x2, dist_food, dist_x2, move_to_food
-            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food])
+            # 14 dims: head, vel, food, x2, has_x2, dist_food, dist_x2, move_to_food, ate_food, ate_x2
+            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2])
         if not add_velocity:
             seq = []
             for f in feats:
@@ -82,9 +84,10 @@ def load_track_sequences(
                 fx, fy = f.get("fx",0), f.get("fy",0)
                 xx, xy = f.get("xx",0), f.get("xy",0)
                 hx2 = f.get("has_x2",0)
+                ate_food, ate_x2 = f.get("ate_food",0), f.get("ate_x2",0)
                 df = min(((fx-xc)**2+(fy-yc)**2)**0.5, 1.5) if (fx or fy) else 0.0
                 dx2 = min(((xx-xc)**2+(xy-yc)**2)**0.5, 1.5) if hx2 and (xx or xy) else 0.0
-                seq.append([xc, yc, 0, 0, fx, fy, xx, xy, hx2, df, dx2, 0.0])
+                seq.append([xc, yc, 0, 0, fx, fy, xx, xy, hx2, df, dx2, 0.0, ate_food, ate_x2])
 
         label = rec.get("label", "correct")
         label_idx = 1 if label == "incorrect" else 0
@@ -97,11 +100,12 @@ def load_track_sequences(
 
 
 def load_grid_sequences(
-    batches_dir: Path
+    batches_dir: Path, add_velocity: bool = True
 ) -> tuple[list[tuple[list[list[float]], int, int, int]], list[tuple[str, int]]]:
     """
-    从 batch JSON 加载网格序列: 每蛇每食物周期为一条样本
-    features: [head_x_norm, head_y_norm, food_x_norm, food_y_norm, x2_x_norm, x2_y_norm, has_x2, score_norm]
+    从 batch JSON 加载网格序列，特征必须与 YOLO/label 路径一致（仅用 YOLO 可检测的 head/food/x2）。
+    不使用 x2_active、score 等游戏内部状态。
+    输出 14 维与 track 一致: [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2]
     """
     from models.behavior_correctness import REASON_TO_IDX
 
@@ -117,7 +121,7 @@ def load_grid_sequences(
             snakes_data = scenes[0].get("snakes", [])
             num_snakes = len(snakes_data)
             for si in range(num_snakes):
-                seq = []
+                raw_frames: list[tuple[float, float, float, float, float, float, float]] = []
                 for sc in scenes:
                     snakes = sc.get("snakes", [])
                     if si >= len(snakes):
@@ -126,21 +130,42 @@ def load_grid_sequences(
                     body = s.get("body", [])
                     food = s.get("food", [0, 0])
                     x2 = s.get("x2")
-                    score = s.get("score", 0)
-                    x2_active = s.get("x2_active", False)
                     if not body:
                         continue
                     hx, hy = body[0][0], body[0][1]
                     fx, fy = int(food[0]) if food else 0, int(food[1]) if food else 0
                     xx, xy = (int(x2[0]), int(x2[1])) if x2 else (0, 0)
-                    feat = [
-                        _norm(hx, GRID_W), _norm(hy, GRID_H),
-                        _norm(fx, GRID_W), _norm(fy, GRID_H),
-                        _norm(xx, GRID_W) if x2 else 0, _norm(xy, GRID_H) if x2 else 0,
-                        1.0 if x2_active else 0.0,
-                        min(score / 24.0, 1.0),
-                    ]
-                    seq.append(feat)
+                    xc = _norm(hx, GRID_W)
+                    yc = _norm(hy, GRID_H)
+                    raw_frames.append((xc, yc, _norm(fx, GRID_W), _norm(fy, GRID_H),
+                                       _norm(xx, GRID_W) if x2 else 0, _norm(xy, GRID_H) if x2 else 0,
+                                       1.0 if x2 else 0.0))
+                if len(raw_frames) < 2:
+                    continue
+                seq = []
+                for i, (xc, yc, fx, fy, xx, xy, has_x2) in enumerate(raw_frames):
+                    p = raw_frames[i - 1] if i > 0 else None
+                    ate_food, ate_x2 = 0.0, 0.0
+                    if p:
+                        thresh = 0.02
+                        def _d(ax, ay, bx, by): return (ax - bx) ** 2 + (ay - by) ** 2
+                        if (p[2] or p[3]) and _d(fx, fy, p[2], p[3]) > thresh and _d(xc, yc, p[2], p[3]) < thresh:
+                            ate_food = 1.0
+                        if p[6] and (not has_x2 or _d(xx, xy, p[4], p[5]) > thresh) and (p[4] or p[5]) and _d(xc, yc, p[4], p[5]) < thresh:
+                            ate_x2 = 1.0
+                    if add_velocity and i > 0 and p is not None:
+                        dx, dy = xc - p[0], yc - p[1]
+                        df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
+                        dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
+                        vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
+                        to_food = (fx - xc) * dx + (fy - yc) * dy
+                        move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
+                    else:
+                        dx, dy = 0.0, 0.0
+                        df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
+                        dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
+                        move_to_food = 0.0
+                    seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2])
                 if len(seq) < 2:
                     continue
                 anns = scenes[-1].get("snake_annotations", [])
@@ -179,7 +204,9 @@ def main():
     p.add_argument("--dropout", type=float, default=0.3, help="LSTM dropout")
     p.add_argument("--label-smoothing", type=float, default=0.1, help="CE label smoothing")
     p.add_argument("--input-dim", type=int, default=0,
-                   help="0=自动: track 用 4，grid 用 8")
+                   help="0=自动: track 用 14*7=98（含 7 帧上下文），grid 用 8")
+    p.add_argument("--frame-context", type=int, default=7,
+                   help="前后帧合并数：3 前 + 当前 + 3 后 = 7。1 表示不合并")
     p.add_argument("--val-ratio", type=float, default=0.2)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--no-velocity", action="store_true",
@@ -217,13 +244,19 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    frame_ctx = max(1, args.frame_context)
+    if frame_ctx % 2 == 0:
+        frame_ctx += 1  # 确保奇数：3+1+3
+    half = frame_ctx // 2
+
     if args.data.lower() == "grid":
         batches_dir = Path(args.batches)
         if not batches_dir.is_absolute():
             batches_dir = ROOT / batches_dir
-        samples, episode_keys = load_grid_sequences(batches_dir)
-        input_dim = args.input_dim or 8
-        print(f"从 grid 加载: {len(samples)} 条序列, input_dim={input_dim}")
+        samples, episode_keys = load_grid_sequences(batches_dir, add_velocity=not args.no_velocity)
+        base_dim = 14
+        input_dim = args.input_dim or (base_dim * frame_ctx if frame_ctx > 1 else base_dim)
+        print(f"从 grid 加载: {len(samples)} 条序列 (与 YOLO 路径同特征), base_dim={base_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
     else:
         data_path = Path(args.data)
         if not data_path.is_absolute():
@@ -233,8 +266,9 @@ def main():
             print("请先运行: python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences")
             sys.exit(1)
         samples, episode_keys = load_track_sequences(data_path, add_velocity=not args.no_velocity)
-        input_dim = args.input_dim or (len(samples[0][0][0]) if samples else 9)
-        print(f"从 track_sequences 加载: {len(samples)} 条序列, input_dim={input_dim}")
+        base_dim = len(samples[0][0][0]) if samples else 14
+        input_dim = args.input_dim or (base_dim * frame_ctx if frame_ctx > 1 else base_dim)
+        print(f"从 track_sequences 加载: {len(samples)} 条序列, base_dim={base_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
 
     if not samples:
         print("无有效样本")
@@ -281,10 +315,26 @@ def main():
             weights = [w * (args.incorrect_weight if s[1] == 1 else 1.0) for w, s in zip(weights, data)]
         return weights
 
+    def _merge_frame_context(self, seq: list, base_dim: int, half: int) -> list:
+        """将前后各 half 帧并入当前帧。seq 每项 base_dim 维，输出每项 base_dim*(2*half+1) 维。"""
+        if half <= 0:
+            return seq
+        n = len(seq)
+        out = []
+        for i in range(n):
+            ctx = []
+            for j in range(i - half, i + half + 1):
+                idx = max(0, min(n - 1, j))
+                ctx.extend(seq[idx])
+            out.append(ctx)
+        return out
+
     class SeqDataset(Dataset):
-        def __init__(self, data, augment=False):
+        def __init__(self, data, augment=False, frame_context_half=0, base_dim=14):
             self.data = data
             self.augment = augment
+            self.frame_half = frame_context_half
+            self.base_dim = base_dim
 
         def __len__(self):
             return len(self.data)
@@ -315,6 +365,8 @@ def main():
         def __getitem__(self, i):
             seq, label, reason, is_ep = self.data[i]
             arr = self._augment_seq(seq)
+            if self.frame_half > 0:
+                arr = _merge_frame_context(arr, self.base_dim, self.frame_half)
             return torch.tensor(arr, dtype=torch.float32), label, reason, is_ep
 
     def collate(batch):
@@ -326,7 +378,11 @@ def main():
         is_endpoints = torch.tensor(is_eps, dtype=torch.float32).unsqueeze(1)
         return padded, lengths, labels, reasons, is_endpoints
 
-    train_ds = SeqDataset(train_samples, augment=True)
+    train_ds = SeqDataset(
+        train_samples, augment=True,
+        frame_context_half=half if frame_ctx > 1 else 0,
+        base_dim=base_dim,
+    )
     sampler = None
     if args.oversample:
         sw = _sample_weights(train_samples)
@@ -340,7 +396,11 @@ def main():
         num_workers=0,
     )
     val_loader = DataLoader(
-        SeqDataset(val_samples, augment=False),
+        SeqDataset(
+            val_samples, augment=False,
+            frame_context_half=half if frame_ctx > 1 else 0,
+            base_dim=base_dim,
+        ),
         batch_size=args.batch_size,
         shuffle=False,
         collate_fn=collate,

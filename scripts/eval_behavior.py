@@ -50,7 +50,28 @@ def _scene_to_features(scene: dict) -> dict[int, dict]:
     return out
 
 
+def _infer_ate_from_scene(prev: dict | None, curr: dict) -> tuple[float, float]:
+    """从前后帧 scene 特征推断 ate_food, ate_x2"""
+    if prev is None:
+        return 0.0, 0.0
+    xc, yc = curr["xc"], curr["yc"]
+    fx, fy = curr["fx"], curr["fy"]
+    thresh = 0.02
+    def _d(ax, ay, bx, by): return (ax - bx) ** 2 + (ay - by) ** 2
+    ate_food = 0.0
+    pfx, pfy = prev["fx"], prev["fy"]
+    if (pfx or pfy) and _d(fx, fy, pfx, pfy) > thresh and _d(xc, yc, pfx, pfy) < thresh:
+        ate_food = 1.0
+    ate_x2 = 0.0
+    if prev.get("has_x2") and (not curr.get("has_x2") or _d(curr["xx"], curr["xy"], prev["xx"], prev["xy"]) > thresh):
+        pxx, pxy = prev["xx"], prev["xy"]
+        if (pxx or pxy) and _d(xc, yc, pxx, pxy) < thresh:
+            ate_x2 = 1.0
+    return ate_food, ate_x2
+
+
 def _build_seq_features(scene_features: list[dict], input_dim: int) -> dict[int, list[list[float]]]:
+    """构建 14 维特征（与 YOLO 路径一致，仅用可检测的 head/food/x2），input_dim 仅用于兼容性判断。"""
     snake_seqs = {}
     num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
     for si in range(num_snakes):
@@ -62,22 +83,19 @@ def _build_seq_features(scene_features: list[dict], input_dim: int) -> dict[int,
             xc, yc = f["xc"], f["yc"]
             fx, fy, xx, xy = f["fx"], f["fy"], f["xx"], f["xy"]
             has_x2 = f["has_x2"]
-            x2_active = f.get("x2_active", False)
-            score = f.get("score", 0)
-            if input_dim == 8:
-                feat = [xc, yc, fx, fy, xx, xy, 1.0 if x2_active else 0.0, min(score / 24.0, 1.0)]
+            prev_f = scene_features[t - 1][si] if t > 0 and si in scene_features[t - 1] else None
+            ate_food, ate_x2 = _infer_ate_from_scene(prev_f, f)
+            if t > 0 and si in scene_features[t - 1]:
+                prev = scene_features[t - 1][si]
+                dx, dy = xc - prev["xc"], yc - prev["yc"]
             else:
-                if t > 0 and si in scene_features[t - 1]:
-                    prev = scene_features[t - 1][si]
-                    dx, dy = xc - prev["xc"], yc - prev["yc"]
-                else:
-                    dx, dy = 0.0, 0.0
-                df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
-                dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
-                vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
-                to_food = (fx - xc) * dx + (fy - yc) * dy
-                move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-                feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food]
+                dx, dy = 0.0, 0.0
+            df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
+            dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
+            vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
+            to_food = (fx - xc) * dx + (fy - yc) * dy
+            move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
+            feat = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2]
             seq.append(feat)
         if len(seq) >= 2:
             snake_seqs[si] = seq
@@ -100,6 +118,7 @@ def load_samples_from_track(path: Path, add_velocity: bool = True):
             fx, fy = f.get("fx", 0.0), f.get("fy", 0.0)
             xx, xy = f.get("xx", 0.0), f.get("xy", 0.0)
             has_x2 = f.get("has_x2", 0.0)
+            ate_food, ate_x2 = f.get("ate_food", 0.0), f.get("ate_x2", 0.0)
             df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
             dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
             if add_velocity and i > 0:
@@ -110,7 +129,7 @@ def load_samples_from_track(path: Path, add_velocity: bool = True):
                 move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
             else:
                 dx, dy, move_to_food = 0.0, 0.0, 0.0
-            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food])
+            seq.append([xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2])
         seqs.append(seq)
         labels.append(1 if rec.get("label") == "incorrect" else 0)
         reasons.append(REASON_TO_IDX.get(rec.get("reason", "in_progress"), REASON_TO_IDX["in_progress"]))
@@ -118,10 +137,9 @@ def load_samples_from_track(path: Path, add_velocity: bool = True):
 
 
 def load_samples_from_batches(
-    batches_dir: Path, dataset_dir: Path | None, input_dim: int, skip_n: int = 5
+    batches_dir: Path, dataset_dir: Path | None, input_dim: int
 ):
-    """从 batches 加载样本，返回 (seq_list, label_list, reason_list)"""
-    from render_and_export import is_key_frame
+    """从 batches 加载样本，返回 (seq_list, label_list, reason_list)。不跳帧，使用全帧。"""
     from models.behavior_correctness import REASON_TO_IDX
 
     metadata = None
@@ -151,14 +169,6 @@ def load_samples_from_batches(
                 if not scene_indices:
                     continue
                 scene_features = [_scene_to_features(scenes[i]) for i in scene_indices if i < len(scenes)]
-            elif input_dim == 12:
-                ep_reason = ep.get("reason", "")
-                scene_features = []
-                for sc_idx, sc in enumerate(scenes):
-                    prev = scenes[sc_idx - 1] if sc_idx > 0 else None
-                    key = is_key_frame(sc, prev, sc_idx == len(scenes) - 1, ep_reason)
-                    if key or skip_n <= 1 or (sc_idx % skip_n == 0):
-                        scene_features.append(_scene_to_features(sc))
             else:
                 scene_features = [_scene_to_features(sc) for sc in scenes]
 
@@ -183,7 +193,6 @@ def main():
     p.add_argument("-c", "--model", required=True, help="行为模型 checkpoint")
     p.add_argument("-d", "--data", default="", help="track_sequences.json 或 dataset 目录（与 -b 联用）")
     p.add_argument("-b", "--batches", default="", help="batches 目录；指定时从 batch 评估，否则 -d 需为 track_sequences.json")
-    p.add_argument("--skip-n", type=int, default=5, help="batches 模式下 track 的跳帧数")
     p.add_argument("--no-velocity", action="store_true", help="track 数据不加速度特征")
     p.add_argument("--max-samples", type=int, default=0, help="最多评估样本数，0=全部")
     p.add_argument("--incorrect-threshold", type=float, default=0.5,
@@ -223,7 +232,7 @@ def main():
             dataset_dir = ROOT / dataset_dir
         print(f"从 batches 加载 (input_dim={input_dim})...")
         seqs, gt_labels, gt_reasons = load_samples_from_batches(
-            batches_dir, dataset_dir, input_dim, args.skip_n
+            batches_dir, dataset_dir, input_dim
         )
     else:
         data_path = Path(args.data)
@@ -245,9 +254,34 @@ def main():
         seqs, gt_labels, gt_reasons = seqs[: args.max_samples], gt_labels[: args.max_samples], gt_reasons[: args.max_samples]
     print(f"共 {len(seqs)} 条样本")
 
+    # 推理时需与训练一致的帧合并（前后 3+当前+3）。特征统一为 14 维（YOLO 可检测）
+    base_dim = 14
+    if input_dim == 8:
+        print("警告: 旧版 8 维 grid 模型已废弃，请用 track 数据重新训练。当前按 14 维处理。")
+    frame_ctx = input_dim // base_dim if input_dim >= base_dim and input_dim % base_dim == 0 else 1
+    half = frame_ctx // 2
+
+    def _merge_frame_context(seqs: list) -> list:
+        if half <= 0:
+            return seqs
+        out = []
+        for seq in seqs:
+            n = len(seq)
+            merged = []
+            for i in range(n):
+                ctx = []
+                for j in range(i - half, i + half + 1):
+                    idx = max(0, min(n - 1, j))
+                    ctx.extend(seq[idx])
+                merged.append(ctx)
+            out.append(merged)
+        return out
+
     # 推理（支持 incorrect 阈值以平衡 precision/recall）
     thresh = args.incorrect_threshold
     INCORRECT_REASON_IDX = {3, 4, 5, 6}  # self_collision, snake_collision, x2_wasted, timeout
+    if half > 0:
+        seqs = _merge_frame_context(seqs)
     pred_labels, pred_reasons, pred_reason_probs = [], [], []
     with torch.no_grad():
         for seq in seqs:
