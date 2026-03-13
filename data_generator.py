@@ -162,10 +162,26 @@ def run_episode(
     }
 
 
+def _generate_one_batch(args: tuple) -> int:
+    """生成单个 batch（子进程调用）"""
+    batch_id, batch_size, output_dir, kwargs = args
+    episodes = []
+    base_seed = batch_id * batch_size
+    for i in range(batch_size):
+        ep = run_episode(seed=base_seed + i, **kwargs)
+        episodes.append(ep)
+    out = Path(output_dir)
+    batch_path = out / f"batch_{batch_id:05d}.json"
+    data = {"episodes": episodes, "batch_id": batch_id, "batch_size": len(episodes)}
+    batch_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    return batch_id
+
+
 def generate_dataset(
     num_batches: int = 1000,
     batch_size: int = 100,
     output_dir: str | Path = "batches",
+    workers: int | None = None,
     **kwargs,
 ) -> None:
     """
@@ -173,41 +189,53 @@ def generate_dataset(
     num_batches: 生成多少个 batch
     batch_size: 每个 batch 的局数
     output_dir: 输出目录
+    workers: 并行进程数，1 或 None 表示单进程
     """
+    import multiprocessing as mp
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     total = num_batches * batch_size
 
-    for b in range(num_batches):
-        episodes = []
-        base_seed = b * batch_size
-        for i in range(batch_size):
-            ep = run_episode(seed=base_seed + i, **kwargs)
-            episodes.append(ep)
+    workers = workers or 1
+    workers = min(workers, num_batches)
 
-        batch_path = out / f"batch_{b:05d}.json"
-        data = {"episodes": episodes, "batch_id": b, "batch_size": len(episodes)}
-        batch_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-        print(f"Batch {b + 1}/{num_batches} -> {batch_path}")
+    if workers <= 1:
+        for b in range(num_batches):
+            _generate_one_batch((b, batch_size, str(out), kwargs))
+            print(f"Batch {b + 1}/{num_batches} -> {out / f'batch_{b:05d}.json'}")
+    else:
+        work_items = [(b, batch_size, str(out), kwargs) for b in range(num_batches)]
+        print(f"使用 {workers} 个进程并行生成...")
+        with mp.Pool(processes=workers) as pool:
+            for idx, batch_id in enumerate(
+                pool.imap_unordered(_generate_one_batch, work_items, chunksize=1)
+            ):
+                print(f"Batch {batch_id + 1}/{num_batches} -> {out / f'batch_{batch_id:05d}.json'}", flush=True)
 
     print(f"完成：共 {total} 局，{num_batches} 个 batch -> {out}")
 
 
 if __name__ == "__main__":
     import argparse
+    import multiprocessing as mp
     p = argparse.ArgumentParser(description="生成贪吃蛇行为识别数据集")
     p.add_argument("--batches", "-b", type=int, default=10, help="batch 数量")
     p.add_argument("--batch-size", "-s", type=int, default=10, help="每 batch 局数")
     p.add_argument("--output", "-o", default="batches", help="输出目录")
+    p.add_argument("--workers", "-w", type=int, default=None,
+                   help="并行进程数，默认 CPU 核心数")
     p.add_argument("--mistake-rate", "-m", type=float, default=0.15,
                    help="AI 犯错概率（先吃食物浪费 x2）")
     p.add_argument("--max-foods", "-f", type=int, default=12,
                    help="每局需吃完的食物波数")
     args = p.parse_args()
+    workers = args.workers or (mp.cpu_count() or 4)
     generate_dataset(
         num_batches=args.batches,
         batch_size=args.batch_size,
         output_dir=args.output,
+        workers=workers,
         ai_mistake_rate=args.mistake_rate,
         max_foods=args.max_foods,
     )
