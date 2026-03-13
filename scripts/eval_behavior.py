@@ -282,7 +282,7 @@ def main():
     INCORRECT_REASON_IDX = {3, 4, 5, 6}  # self_collision, snake_collision, x2_wasted, timeout
     if half > 0:
         seqs = _merge_frame_context(seqs)
-    pred_labels, pred_reasons, pred_reason_probs = [], [], []
+    pred_labels, pred_reasons, prob_incorrect_list, pred_reason_probs = [], [], [], []
     with torch.no_grad():
         for seq in seqs:
             x = torch.tensor([seq], dtype=torch.float32)
@@ -293,83 +293,44 @@ def main():
             if args.reason_override and pred_r in INCORRECT_REASON_IDX:
                 pred_labels[-1] = 1  # 预测为错误类 reason 时强制 label=incorrect
             pred_reasons.append(pred_r)
+            prob_incorrect_list.append(float(prob_c[1]))
             pred_reason_probs.append(torch.softmax(logits_r, dim=1).cpu().numpy()[0])
 
-    # 计算指标
+    # 计算指标：P, R, mAP50, mAP50-95
     try:
-        from sklearn.metrics import (
-            precision_recall_fscore_support,
-            confusion_matrix,
-            accuracy_score,
-            average_precision_score,
-        )
+        from sklearn.metrics import precision_recall_fscore_support, average_precision_score
+        from sklearn.preprocessing import label_binarize
     except ImportError:
         print("请安装 sklearn: pip install scikit-learn")
         sys.exit(1)
 
     gt_labels = np.array(gt_labels)
-    gt_reasons = np.array(gt_reasons)
     pred_labels = np.array(pred_labels)
-    pred_reasons = np.array(pred_reasons)
-
-    # Label (correct=0, incorrect=1)
-    print("\n" + "=" * 60)
-    print("Label (correct / incorrect)")
-    print("=" * 60)
-    p_l, r_l, f1_l, _ = precision_recall_fscore_support(gt_labels, pred_labels, average=None, zero_division=0)
-    acc_l = accuracy_score(gt_labels, pred_labels)
-    for i, name in enumerate(["correct", "incorrect"]):
-        print(f"  {name:10s}  P: {p_l[i]:.4f}  R: {r_l[i]:.4f}  F1: {f1_l[i]:.4f}")
-    print(f"  {'all':10s}  Accuracy: {acc_l:.4f}")
-
-    # Reason (7 classes)
-    print("\n" + "=" * 60)
-    print("Reason (各类别)")
-    print("=" * 60)
-    p_r, r_r, f1_r, sup_r = precision_recall_fscore_support(
-        gt_reasons, pred_reasons, labels=range(len(REASON_NAMES)), average=None, zero_division=0
-    )
-    n_reasons = len(REASON_NAMES)
-    # mAP: one-vs-rest 各类 AP 的均值
+    prob_incorrect = np.array(prob_incorrect_list)
     pred_probs = np.array(pred_reason_probs)
-    try:
-        from sklearn.preprocessing import label_binarize
-        y_bin = label_binarize(gt_reasons, classes=range(n_reasons))
-        ap_per_class = []
-        for c in range(n_reasons):
-            if y_bin[:, c].sum() == 0:
-                ap_per_class.append(float("nan"))
-                continue
-            ap = average_precision_score(y_bin[:, c], pred_probs[:, c])
-            ap_per_class.append(ap)
-        valid_ap = [a for a in ap_per_class if not np.isnan(a)]
-        mAP = np.mean(valid_ap) if valid_ap else 0.0
-    except Exception:
-        mAP = 0.0
 
-    # 打印每类
-    print(f"  {'class':<22}  {'P':>8}  {'R':>8}  {'F1':>8}  {'support':>8}")
-    print("  " + "-" * 56)
-    for i in range(n_reasons):
-        s = int(sup_r[i]) if i < len(sup_r) else 0
-        print(f"  {REASON_NAMES[i]:<22}  {p_r[i]:>8.4f}  {r_r[i]:>8.4f}  {f1_r[i]:>8.4f}  {s:>8}")
-    p_macro = np.mean(p_r)
-    r_macro = np.mean(r_r)
-    f1_macro = np.mean(f1_r)
-    print("  " + "-" * 56)
-    print(f"  {'macro avg':<22}  {p_macro:>8.4f}  {r_macro:>8.4f}  {f1_macro:>8.4f}")
-    print(f"  {'mAP (AP mean)':<22}  {mAP:>8.4f}")
+    # P, R：incorrect 类（正类）
+    p_l, r_l, _, _ = precision_recall_fscore_support(
+        gt_labels, pred_labels, labels=[0, 1], average=None, zero_division=0
+    )
+    p_inc, r_inc = p_l[1], r_l[1]
 
-    # 混淆矩阵
-    print("\n" + "=" * 60)
-    print("Reason 混淆矩阵 (行=GT, 列=Pred)")
-    print("=" * 60)
-    cm = confusion_matrix(gt_reasons, pred_reasons, labels=range(n_reasons))
-    header = "       " + "".join(f"{REASON_NAMES[i][:6]:>8}" for i in range(n_reasons))
-    print(header)
-    for i in range(n_reasons):
-        row = f"{REASON_NAMES[i][:6]:>6}" + "".join(f"{cm[i,j]:>8}" for j in range(n_reasons))
-        print(row)
+    # mAP50：incorrect 的 AP（P(incorrect) 为 score）
+    ap50 = average_precision_score(gt_labels, prob_incorrect) if gt_labels.sum() > 0 else 0.0
+
+    # mAP50-95：7 类 reason 的 mAP（各类 AP 均值）
+    gt_reasons_arr = np.array(gt_reasons)
+    n_reasons = len(REASON_NAMES)
+    y_bin = label_binarize(gt_reasons_arr, classes=range(n_reasons))
+    ap_per_class = []
+    for c in range(n_reasons):
+        if y_bin[:, c].sum() == 0:
+            continue
+        ap = average_precision_score(y_bin[:, c], pred_probs[:, c])
+        ap_per_class.append(ap)
+    map50_95 = np.mean(ap_per_class) if ap_per_class else 0.0
+
+    print(f"\nP: {p_inc:.4f}  R: {r_inc:.4f}  mAP50: {ap50:.4f}  mAP50-95: {map50_95:.4f}")
 
 
 if __name__ == "__main__":
