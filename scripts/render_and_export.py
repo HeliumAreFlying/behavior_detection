@@ -94,33 +94,38 @@ def render_scene(scene: dict) -> "pygame.Surface":
     for y in range(GRID_H + 1):
         pygame.draw.line(screen, GRID_LINE, (0, y * CELL_SIZE), (IMG_W, y * CELL_SIZE))
 
-    # 食物、x2
+    # 食物(F)、x2、蛇身(H/无字)，每阵营一色
+    try:
+        cell_font = pygame.font.SysFont("arial", 14)
+    except Exception:
+        cell_font = None
     for s in snakes_data:
         cid = s.get("color_id", 0) % len(SNAKE_COLORS)
-        colors = SNAKE_COLORS[cid]
+        col = SNAKE_COLORS[cid]["body"]
         food = s.get("food", [0, 0])
         x2 = s.get("x2")
         if food:
             fx, fy = food[0] % GRID_W, food[1] % GRID_H
             rect = (fx * CELL_SIZE + 2, fy * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4)
-            pygame.draw.rect(screen, colors["food"], rect, border_radius=4)
+            pygame.draw.rect(screen, col, rect, border_radius=4)
+            if cell_font:
+                txt = cell_font.render("F", True, (40, 40, 40))
+                tw, th = txt.get_size()
+                screen.blit(txt, (fx * CELL_SIZE + (CELL_SIZE - tw) // 2, fy * CELL_SIZE + (CELL_SIZE - th) // 2))
         if x2:
             xx, xy = x2[0] % GRID_W, x2[1] % GRID_H
             rect = (xx * CELL_SIZE + 2, xy * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4)
-            pygame.draw.rect(screen, colors["x2"], rect, border_radius=4)
-            try:
-                font = pygame.font.SysFont("arial", 14)
-                txt = font.render("x2", True, (40, 40, 40))
+            pygame.draw.rect(screen, col, rect, border_radius=4)
+            if cell_font:
+                txt = cell_font.render("x2", True, (40, 40, 40))
                 tw, th = txt.get_size()
                 screen.blit(txt, (xx * CELL_SIZE + (CELL_SIZE - tw) // 2, xy * CELL_SIZE + (CELL_SIZE - th) // 2))
-            except Exception:
-                pass
 
-    # 蛇身（蛇头用深色 x2，蛇身用 body）
+    # 蛇身：同色，蛇头显示 H
     for s in snakes_data:
         body = s.get("body", [])
         cid = s.get("color_id", 0) % len(SNAKE_COLORS)
-        colors = SNAKE_COLORS[cid]
+        col = SNAKE_COLORS[cid]["body"]
         for i, pos in enumerate(body):
             try:
                 sx, sy = int(pos[0]), int(pos[1])
@@ -129,8 +134,11 @@ def render_scene(scene: dict) -> "pygame.Surface":
             sx = ((sx % GRID_W) + GRID_W) % GRID_W
             sy = ((sy % GRID_H) + GRID_H) % GRID_H
             rect = (sx * CELL_SIZE + 1, sy * CELL_SIZE + 1, CELL_SIZE - 2, CELL_SIZE - 2)
-            seg_color = colors["x2"] if i == 0 else colors["body"]
-            pygame.draw.rect(screen, seg_color, rect, border_radius=3)
+            pygame.draw.rect(screen, col, rect, border_radius=3)
+            if i == 0 and cell_font:
+                txt = cell_font.render("H", True, (40, 40, 40))
+                tw, th = txt.get_size()
+                screen.blit(txt, (sx * CELL_SIZE + (CELL_SIZE - tw) // 2, sy * CELL_SIZE + (CELL_SIZE - th) // 2))
 
     return screen
 
@@ -189,7 +197,7 @@ def main():
     pygame.init()
     pygame.display.set_mode((1, 1))
 
-    all_samples: list[tuple[dict, int, int]] = []
+    all_samples: list[tuple[dict, int, int, str]] = []
     for bf in batch_files:
         data = json.loads(bf.read_text(encoding="utf-8"))
         for ep_idx, ep in enumerate(data.get("episodes", [])):
@@ -202,7 +210,7 @@ def main():
                 is_last = sc_idx == len(scenes) - 1
                 key = is_key_frame(scene, prev, is_last, ep_reason)
                 if key or (skip_n <= 1) or (sc_idx % skip_n == 0):
-                    all_samples.append((scene, ep_idx, sc_idx))
+                    all_samples.append((scene, ep_idx, sc_idx, bf.name))
 
     n = len(all_samples)
     val_n = int(n * args.val_ratio)
@@ -213,8 +221,9 @@ def main():
     train_idx = set(indices[:train_n])
     val_idx = set(indices[train_n:])
 
+    metadata_list: list[dict] = []
     global_idx = 0
-    for i, (scene, ep_idx, sc_idx) in enumerate(all_samples):
+    for i, (scene, ep_idx, sc_idx, batch_name) in enumerate(all_samples):
         split = "val" if i in val_idx else "train"
         img_dir = output_dir / split / "images"
         lbl_dir = output_dir / split / "labels"
@@ -236,6 +245,13 @@ def main():
         beh_data = {"snake_annotations": snake_ann}
         beh_path.write_text(json.dumps(beh_data, ensure_ascii=False), encoding="utf-8")
 
+        metadata_list.append({
+            "id": name,
+            "split": split,
+            "batch": batch_name,
+            "episode": ep_idx,
+            "scene": sc_idx,
+        })
         global_idx += 1
         if global_idx % 500 == 0:
             print(f"已处理 {global_idx}/{n} ...")
@@ -251,6 +267,11 @@ nc: {len(CLASS_NAMES)}
 names: {CLASS_NAMES}
 """
     (output_dir / "data.yaml").write_text(data_yaml, encoding="utf-8")
+
+    # 元数据：供跟踪脚本按 episode 分组，重建时序
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata_list, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     print(f"完成: train {train_n}, val {val_n}, 总计 {n} (跳帧 skip_n={skip_n})")
     print(f"输出: {output_dir}")

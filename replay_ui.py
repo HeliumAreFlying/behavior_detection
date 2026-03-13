@@ -255,37 +255,46 @@ def draw_scene(
             (margin_x + grid_w * cell_size, grid_y + y * cell_size),
         )
 
-    # 先画食物和 x2（避免挡住蛇身）
+    # 食物(F)、x2、蛇身(H/无字)，每阵营一色
     for s in snakes_data:
         cid = s.get("color_id", 0) % len(SNAKE_COLORS)
-        colors = SNAKE_COLORS[cid]
+        col = SNAKE_COLORS[cid]["body"]
         food = s.get("food", [0, 0])
         x2 = s.get("x2")
         if food:
             fx, fy = food[0] % grid_w, food[1] % grid_h
             rect = (margin_x + fx * cell_size + 2, grid_y + fy * cell_size + 2,
                     cell_size - 4, cell_size - 4)
-            pygame.draw.rect(screen, colors["food"], rect, border_radius=4)
+            pygame.draw.rect(screen, col, rect, border_radius=4)
+            txt = small_font.render("F", True, (40, 40, 40))
+            tw, th = txt.get_size()
+            screen.blit(txt, (margin_x + fx * cell_size + (cell_size - tw) // 2,
+                             grid_y + fy * cell_size + (cell_size - th) // 2))
         if x2:
             xx, xy = x2[0] % grid_w, x2[1] % grid_h
             rect = (margin_x + xx * cell_size + 2, grid_y + xy * cell_size + 2,
                     cell_size - 4, cell_size - 4)
-            pygame.draw.rect(screen, colors["x2"], rect, border_radius=4)
+            pygame.draw.rect(screen, col, rect, border_radius=4)
             txt = small_font.render("x2", True, (40, 40, 40))
             tw, th = txt.get_size()
             screen.blit(txt, (margin_x + xx * cell_size + (cell_size - tw) // 2,
                              grid_y + xy * cell_size + (cell_size - th) // 2))
 
-    # 蛇身（每蛇用自身颜色系）
+    # 蛇身：同色，蛇头显示 H
     for s in snakes_data:
         body = s.get("body", [])
         cid = s.get("color_id", 0) % len(SNAKE_COLORS)
-        body_color = SNAKE_COLORS[cid]["body"]
+        col = SNAKE_COLORS[cid]["body"]
         for i, (sx, sy) in enumerate(body):
             sx, sy = sx % grid_w, sy % grid_h
             rect = (margin_x + sx * cell_size + 1, grid_y + sy * cell_size + 1,
                     cell_size - 2, cell_size - 2)
-            pygame.draw.rect(screen, body_color, rect, border_radius=3)
+            pygame.draw.rect(screen, col, rect, border_radius=3)
+            if i == 0:
+                txt = small_font.render("H", True, (40, 40, 40))
+                tw, th = txt.get_size()
+                screen.blit(txt, (margin_x + sx * cell_size + (cell_size - tw) // 2,
+                                 grid_y + sy * cell_size + (cell_size - th) // 2))
 
     # 无数据时显示提示（网格中央）
     if total_episodes == 0:
