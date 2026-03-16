@@ -34,7 +34,7 @@ flowchart TB
 | 2. 渲染导出 | `render_and_export.py` | batch JSON | `dataset/` (640×640 images + labels + metadata) |
 | 3. 目标检测 | YOLO `train` / `track` | 渲染图像 | 检测框 + track_id |
 | 4. 序列构建 | `run_track_and_prepare.py` | dataset（含 train/val） | `sequences/track_sequences.json`（每条序列带 `split`，与 dataset 一致） |
-| 5. 行为训练 | `train_behavior.py` | sequences（按 `split` 划分 train/val）或 grid | `checkpoints/behavior/best.pt` |
+| 5. 行为训练 | `train_behavior.py` | sequences（按 `split` 划分 train/val）或 grid | `checkpoints/behavior/best.pt`（best 按 mAP+阈值搜索选取） |
 | 6. 视频演示 | `demo_video.py` | batch + 模型权重 | 带标注的 MP4 视频 |
 
 ### 18 维连续特征 + 蛇头前方一格（4 类）+ 3 帧上下文（行为模型输入）
@@ -136,8 +136,8 @@ python data_generator.py -b 100 -s 100 -w 12
 | 2 | 渲染导出 | 640×640，全帧不跳帧 |
 | 3 | YOLO 训练 | 可选，5 类含 snake_head_dead |
 | 4 | 序列准备 | 路径 A 纯 label / 路径 B YOLO 跟踪 |
-| 5 | 行为训练 | 双向 LSTM + 注意力；best 按 **mAP**（7 类 AP 均值）选取；`--patience` 早停 |
-| 6 | 评估 | 自动搜索最优 F1 阈值，`--batch-size` 提速 |
+| 5 | 行为训练 | 双向 LSTM + 注意力；best 按 **mAP** 选取（每轮在 0.15~0.85 内搜最优阈值，F1≥0.25 约束）；`--patience` 早停；每轮打印 mAP 与最优阈值 |
+| 6 | 评估 | 默认用与训练一致的 val DataLoader+mask，mAP 与训练一致；阈值在 0.15~0.85 内按 mAP 搜索；`--no-threshold-search` 时用 `--incorrect-threshold` |
 | 7 | 演示视频 | `-d dataset` 与训练帧一致；`--draw-boxes` 绘制 YOLO 框 |
 
 ```bash
@@ -157,11 +157,11 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w
 # 路径 B：YOLO 跟踪（需先完成步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（双向 LSTM + 注意力；best 按 mAP 选取，50 epoch 无提升早停）
+# 5. 行为模型训练（best 按 mAP 选取，每轮搜最优阈值并打印；50 epoch 无提升早停）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 1000 --patience 50
 
-# 6. 评估（自动搜索最优 F1 阈值；--batch-size 256 大批量提速）
+# 6. 评估（默认与训练同一 val 流程，mAP 一致；阈值 0.15~0.85 内搜索；--batch-size 256 提速）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json --batch-size 256
 
 # 7. 演示视频（-d dataset 保证帧与训练一致；路径 B 可加 -m YOLO权重 --draw-boxes）
@@ -203,7 +203,7 @@ python scripts/run_track_and_prepare.py -m yolov8n.pt -d dataset -o sequences
 
 ### 5. 行为模型训练
 
-模型结构：**双向 LSTM + 自注意力**（可用 `--no-bidirectional --no-attention` 禁用以兼容旧版）。best.pt 按 **mAP**（7 类 AP 均值）选取，`--patience 50` 早停。
+模型结构：**双向 LSTM + 自注意力**（可用 `--no-bidirectional --no-attention` 禁用以兼容旧版）。best.pt 按 **mAP** 选取：每轮在阈值 0.15~0.85 内搜索（F1≥0.25 约束下最大化 mAP），用该最优阈值下的 mAP 选 best；每轮打印 `mAP` 与 `thresh`。`--patience 50` 早停。
 
 ```bash
 # 纯网格（推荐先验证）
@@ -232,17 +232,17 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c c
 
 ### 7. 全量评估（P、R、mAP）
 
-默认**仅评估验证集**（`--split val`），与训练时的 val 一致，指标准确。按 **mAP** 最大自动搜索阈值，输出表格（P/R/mAP，每类 + all）。
+默认**仅评估验证集**（`--split val`），且使用与训练**完全一致的 val 流程**（同一 DataLoader + mask），保证 mAP 与训练打印一致。阈值在 **0.15~0.85** 内按 mAP 最大搜索（F1≥0.25 约束）；输出表格（P/R/mAP，每类 + all）。
 
 ```bash
-# 默认评估 val 集（与训练验证集一致）
+# 默认评估 val 集（与训练同一 val 流程，mAP 一致）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
 
 # 评估全部数据：--split all（旧版无 split 的 JSON 也请用此选项）
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --split all
 
-# 使用固定阈值：--no-threshold-search --incorrect-threshold 0.9
-python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --no-threshold-search --incorrect-threshold 0.9
+# 使用固定阈值（不搜索）：--no-threshold-search --incorrect-threshold 0.15
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --no-threshold-search --incorrect-threshold 0.15
 
 # 提升错误召回率：--reason-override
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --reason-override
