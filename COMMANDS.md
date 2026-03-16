@@ -7,7 +7,7 @@
 | `data_generator.py` | `-w 12` | - |
 | `render_and_export.py` | `-w 12` | - |
 | `run_track_and_prepare.py` | `-w 12`（from-labels 时） | - |
-| `train_behavior.py` | `--patience 50` 早停 | `--best-metric reason_f1` 稳健选 best；`--boost-incorrect`；`--no-bidirectional --no-attention` |
+| `train_behavior.py` | `--patience 50` 早停 | best 按 **(mAP50+mAP50-95)/2** 选取；`--boost-incorrect`；`--no-bidirectional --no-attention` |
 | `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认仅评估 **val** 集（`--split val`）；`--split all` 评估全部；`--no-threshold-search` 固定阈值；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
 
@@ -36,7 +36,7 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w
 # 路径 B：YOLO 跟踪（需步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（--best-metric reason_f1 稳健选 best；--patience 50 早停）
+# 5. 行为模型训练（best 按 (mAP50+mAP50-95)/2 选取；--patience 50 早停）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 1000 --patience 50
 
@@ -111,15 +111,15 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior
 ```
 
-**推荐：启用类别平衡与增强；best 按 reason_f1 选取**
+**推荐：启用类别平衡与增强；best 按 (mAP50+mAP50-95)/2 选取**
 
 ```bash
 # 错误检测率低时使用 --boost-incorrect；--patience 50 早停
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --patience 50
 
-# --best-metric：reason_f1(默认) / binary_f1 / composite
-python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --best-metric composite
+# --patience 0 可禁用早停
+python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --patience 30
 
 # 禁用双向 LSTM / 自注意力（兼容旧 checkpoint）
 python scripts/train_behavior.py -d sequences/track_sequences.json -o checkpoints/behavior --no-bidirectional --no-attention

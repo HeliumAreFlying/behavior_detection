@@ -321,8 +321,6 @@ def main():
                    help="多尺度时间：随机取 1/2/3 倍采样子序列")
     p.add_argument("--patience", type=int, default=50,
                    help="早停：验证指标连续 N 个 epoch 无提升则停止，0=禁用")
-    p.add_argument("--best-metric", choices=["reason_f1", "binary_f1", "composite"], default="reason_f1",
-                   help="best.pt 选取指标：reason_f1(7类宏平均,推荐), binary_f1, composite(两者加权)")
     args = p.parse_args()
     if args.boost_incorrect:
         args.class_weights = True
@@ -549,7 +547,7 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"最优模型选取指标: {args.best_metric}  |  早停 patience={args.patience}")
+    print("最优模型选取: 固定 (mAP50 + mAP50-95) / 2  |  早停 patience={}".format(args.patience))
 
     best_val_f1 = 0.0
     best_epoch = 0
@@ -588,6 +586,7 @@ def main():
         model.eval()
         val_preds, val_labels = [], []
         val_reason_preds, val_reason_labels = [], []
+        val_reason_probs_list = []
         with torch.no_grad():
             for x, x_hf, lengths, y_label, y_reason, y_ep in val_loader:
                 x, x_hf = x.to(device), x_hf.to(device)
@@ -604,15 +603,32 @@ def main():
                     r_gt = y_reason[mask].cpu().numpy()
                     val_reason_preds.extend(r_pred.tolist())
                     val_reason_labels.extend(r_gt.tolist())
+                    prob_r = torch.softmax(logits_r[mask], dim=1).cpu().numpy()
+                    val_reason_probs_list.append(prob_r)
 
         binary_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
         reason_f1 = f1_score(val_reason_labels, val_reason_preds, average="macro", zero_division=0) if val_reason_preds else 0.0
-        if args.best_metric == "reason_f1":
-            select_score = reason_f1
-        elif args.best_metric == "binary_f1":
-            select_score = binary_f1
+        # 固定策略: (mAP50 + mAP50-95) / 2（与 eval_behavior 一致，分类任务下两者均为 7 类 AP 的均值）
+        from sklearn.metrics import average_precision_score
+        from sklearn.preprocessing import label_binarize
+        from models.behavior_correctness import NUM_REASONS
+        if val_reason_probs_list:
+            val_reason_probs = np.concatenate(val_reason_probs_list, axis=0)
+            val_reason_labels_arr = np.array(val_reason_labels)
+            y_bin = label_binarize(val_reason_labels_arr, classes=range(NUM_REASONS))
+            ap_per_class = []
+            for c in range(NUM_REASONS):
+                if y_bin[:, c].sum() == 0:
+                    ap_per_class.append(0.0)
+                else:
+                    ap = average_precision_score(y_bin[:, c], val_reason_probs[:, c])
+                    ap_per_class.append(ap)
+            mAP50 = float(np.mean(ap_per_class)) if ap_per_class else 0.0
+            mAP50_95 = mAP50
+            select_score = (mAP50 + mAP50_95) / 2.0
         else:
-            select_score = 0.5 * binary_f1 + 0.5 * reason_f1
+            mAP50 = mAP50_95 = 0.0
+            select_score = 0.0
 
         scheduler.step(select_score)
         if select_score > best_val_f1:
@@ -644,13 +660,13 @@ def main():
         if (ep + 1) % 10 == 0 or ep == 0:
             print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} "
                   f"train_acc={train_correct/train_total:.4f} binary_f1={binary_f1:.4f} reason_f1={reason_f1:.4f} "
-                  f"[best={args.best_metric}]")
+                  f"mAP50={mAP50:.4f} mAP50-95={mAP50_95:.4f} [best=(mAP50+mAP50-95)/2]")
 
         if args.patience > 0 and epochs_without_improve >= args.patience:
             print(f"早停: {args.patience} epoch 无提升，停止于 epoch {ep + 1}")
             break
 
-    print(f"训练完成，最佳 {args.best_metric}={best_val_f1:.4f} (epoch {best_epoch})")
+    print(f"训练完成，最佳 (mAP50+mAP50-95)/2={best_val_f1:.4f} (epoch {best_epoch})")
     print(f"模型保存: {out_dir / 'best.pt'}, {out_dir / 'last.pt'}")
 
 
