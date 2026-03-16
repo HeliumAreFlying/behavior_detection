@@ -243,8 +243,9 @@ def main():
                 ap_per.append(average_precision_score(y_bin[:, c], effective_probs[:, c]))
         return float(np.mean(ap_per)) if ap_per else 0.0
 
-    # 在「binary F1 ≥ 下限」约束下最大化 mAP，避免退化解（阈值过小/过大导致几乎全判为一类）
+    # 与 train_behavior 一致：阈值仅在 [THRESH_MIN, THRESH_MAX] 内搜索，且 binary F1 ≥ MIN_BINARY_F1 约束下最大化 mAP
     MIN_BINARY_F1 = 0.25
+    THRESH_MIN, THRESH_MAX = 0.15, 0.85
     best_thresh = args.incorrect_threshold
     best_score = 0.0
     best_f1_fallback = 0.0
@@ -252,7 +253,7 @@ def main():
     used_f1_fallback = False
     do_search = not args.no_threshold_search
     if do_search:
-        for t in np.arange(0.01, 1.0, 0.01):
+        for t in np.arange(THRESH_MIN, THRESH_MAX + 0.005, 0.01):
             pred_b = _pred_at_thresh(prob_incorrect, pred_reasons_arr, t)
             p_t, r_t, f1_t, _ = precision_recall_fscore_support(
                 gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0

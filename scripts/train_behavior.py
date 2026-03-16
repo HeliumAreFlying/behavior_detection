@@ -612,11 +612,12 @@ def main():
 
         binary_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
         reason_f1 = f1_score(val_reason_labels, val_reason_preds, average="macro", zero_division=0) if val_reason_preds else 0.0
-        # 与 eval_behavior 一致：搜索最优阈值（F1≥0.25 约束下最大化 mAP），用该阈值下的 mAP 选 best
+        # 与 eval_behavior 完全一致：阈值仅在 [THRESH_MIN, THRESH_MAX] 内搜索，F1≥MIN_BINARY_F1 约束下最大化 mAP
         from sklearn.metrics import average_precision_score, precision_recall_fscore_support
         from sklearn.preprocessing import label_binarize
         from models.behavior_correctness import NUM_REASONS
         MIN_BINARY_F1 = 0.25
+        THRESH_MIN, THRESH_MAX = 0.15, 0.85
         best_thresh = 0.5
         if val_reason_probs_list:
             val_reason_probs = np.concatenate(val_reason_probs_list, axis=0)
@@ -647,7 +648,7 @@ def main():
             best_score = 0.0
             best_f1_fallback = 0.0
             best_thresh_f1_fallback = 0.5
-            for t in np.arange(0.01, 1.0, 0.01):
+            for t in np.arange(THRESH_MIN, THRESH_MAX + 0.005, 0.01):
                 pred_b = _pred_at_thresh(val_prob_incorrect, t)
                 p_t, r_t, f1_t, _ = precision_recall_fscore_support(
                     gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0
