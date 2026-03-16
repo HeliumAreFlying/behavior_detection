@@ -44,6 +44,7 @@ def load_samples_from_track(
             head_forward = max(0, min(3, int(f.get("head_forward_type", 0))))
             is_dead = f.get("is_dead", 0.0)
             steps_since_food = f.get("steps_since_food", 0.0)
+            about_to_timeout = f.get("about_to_timeout", (1.0 if steps_since_food >= 79.0 / 80.0 else 0.0))
             df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
             dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
             if add_velocity and i > 0:
@@ -54,7 +55,7 @@ def load_samples_from_track(
                 move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
             else:
                 dx, dy, move_to_food = 0.0, 0.0, 0.0
-            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]
+            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2, about_to_timeout]
             seq_c.append(cont)
             seq_h.append(head_forward)
         seqs_cont.append(seq_c)
@@ -146,7 +147,7 @@ def main():
         gt_reasons = gt_reasons[: args.max_samples]
     print(f"共 {len(seqs_cont)} 条样本")
 
-    base_cont_dim = 17 if use_head_forward_embedding else 16
+    base_cont_dim = 18 if use_head_forward_embedding else 16
     if not use_head_forward_embedding and seqs_cont and len(seqs_cont[0][0]) > 16:
         seqs_cont = [[f[:16] for f in seq] for seq in seqs_cont]
     frame_ctx = input_dim // base_cont_dim if input_dim >= base_cont_dim and input_dim % base_cont_dim == 0 else 1

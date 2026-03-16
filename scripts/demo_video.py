@@ -124,10 +124,10 @@ def _infer_ate_from_scene(prev: dict | None, curr: dict) -> tuple[float, float]:
 def _build_seq_features(
     scene_features: list[dict[int, dict]],
     scenes: list[dict] | None,
-    input_dim: int = 17,
+    input_dim: int = 18,
     last_frame_reasons: dict[int, str] | None = None,
 ) -> dict[int, tuple[list[list[float]], list[int]]]:
-    """构建 17 维 cont + head_forward。"""
+    """构建 18 维 cont + head_forward（含 about_to_timeout）。"""
     snake_seqs: dict[int, tuple[list[list[float]], list[int]]] = {}
     num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
     last_t_per_snake: dict[int, int] = {}
@@ -162,6 +162,7 @@ def _build_seq_features(
             else:
                 steps_counter += 1
             steps_since_food = min(steps_counter / 80.0, 1.0)
+            about_to_timeout = 1.0 if steps_counter >= 79 else 0.0
             is_dead = is_dead_last if last_t_per_snake.get(si, -1) == t else 0.0
             if t > 0 and si in scene_features[t - 1]:
                 prev = scene_features[t - 1][si]
@@ -173,7 +174,7 @@ def _build_seq_features(
             vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
             to_food = (fx - xc) * dx + (fy - yc) * dy
             move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]
+            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2, about_to_timeout]
             seq_cont.append(cont)
             seq_hf.append(head_forward)
         if len(seq_cont) >= 2:
@@ -308,7 +309,7 @@ def main():
     else:
         scene_features_for_model = scene_features
         print(f"行为模型 input_dim={input_dim}, 全帧 {len(scene_features)} 帧")
-    base_cont_dim = 17 if use_head_forward_embedding else 16
+    base_cont_dim = 18 if use_head_forward_embedding else 16
     scenes_for_model = [scenes[i] for i in scene_indices if i < len(scenes)] if use_metadata and scene_indices else scenes
     last_reasons = {si: gt_annotations[si].get("reason", "in_progress") for si in range(len(gt_annotations))}
     snake_seqs = _build_seq_features(scene_features_for_model, scenes_for_model, base_cont_dim, last_frame_reasons=last_reasons)

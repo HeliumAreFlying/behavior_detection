@@ -189,6 +189,8 @@ def extract_sequences_from_labels(
             else:
                 steps_counters[si] = steps_counters[si] + 1
             steps_since_food = min(steps_counters[si] / 80.0, 1.0)
+            # 下一步再没吃到果子就超时(80步)：当前已 79 步未吃则为 1
+            about_to_timeout = 1.0 if steps_counters[si] >= 79 else 0.0
             snake_seqs[si].append({
                 "xc": hx, "yc": hy,
                 "fx": fx, "fy": fy, "xx": xx, "xy": xy, "has_x2": has_x2,
@@ -196,6 +198,7 @@ def extract_sequences_from_labels(
                 "ate_food_while_x2_exists": ate_food_while_x2,
                 "head_forward_type": head_forward,
                 "is_dead": is_dead, "steps_since_food": steps_since_food,
+                "about_to_timeout": about_to_timeout,
                 "t": t,
             })
         prev_rows = rows

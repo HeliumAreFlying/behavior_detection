@@ -68,7 +68,7 @@ def main():
     if args.limit > 0:
         samples = samples[: args.limit]
 
-    base_cont_dim = 17 if use_head_forward_embedding else 16
+    base_cont_dim = 18 if use_head_forward_embedding else 16
     frame_ctx = input_dim // base_cont_dim if input_dim >= base_cont_dim and input_dim % base_cont_dim == 0 else 1
     half = frame_ctx // 2
 

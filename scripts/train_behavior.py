@@ -118,6 +118,7 @@ def load_track_sequences(
             head_forward = max(0, min(3, int(f.get("head_forward_type", 0))))
             is_dead = f.get("is_dead", 0.0)
             steps_since_food = f.get("steps_since_food", 0.0)
+            about_to_timeout = f.get("about_to_timeout", (1.0 if steps_since_food >= 79.0 / 80.0 else 0.0))
             if add_velocity and i > 0:
                 dx = xc - feats[i - 1]["xc"]
                 dy = yc - feats[i - 1]["yc"]
@@ -130,7 +131,7 @@ def load_track_sequences(
             vel_norm = (dx * dx + dy * dy) ** 0.5 or 1e-6
             to_food = (fx - xc) * dx + (fy - yc) * dy
             move_to_food = max(-1, min(1, to_food / vel_norm)) if (fx or fy) else 0.0
-            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]
+            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2, about_to_timeout]
             seq_cont.append(cont)
             seq_hf.append(head_forward)
         if not add_velocity:
@@ -145,9 +146,10 @@ def load_track_sequences(
                 head_forward = max(0, min(3, int(f.get("head_forward_type", 0))))
                 is_dead = f.get("is_dead", 0.0)
                 steps_since_food = f.get("steps_since_food", 0.0)
+                about_to_timeout = f.get("about_to_timeout", (1.0 if steps_since_food >= 79.0 / 80.0 else 0.0))
                 df = min(((fx-xc)**2+(fy-yc)**2)**0.5, 1.5) if (fx or fy) else 0.0
                 dx2 = min(((xx-xc)**2+(xy-yc)**2)**0.5, 1.5) if hx2 and (xx or xy) else 0.0
-                seq_cont.append([xc, yc, 0, 0, fx, fy, xx, xy, hx2, df, dx2, 0.0, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2])
+                seq_cont.append([xc, yc, 0, 0, fx, fy, xx, xy, hx2, df, dx2, 0.0, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2, about_to_timeout])
                 seq_hf.append(head_forward)
 
         label = rec.get("label", "correct")
@@ -169,7 +171,7 @@ def load_grid_sequences(
     """
     从 batch JSON 加载网格序列，特征必须与 YOLO/label 路径一致（仅用 YOLO 可检测的 head/food/x2）。
     不使用 x2_active、score 等游戏内部状态。
-    输出 16 维与 track 一致: [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food]
+    输出 18 维与 track 一致: 上述 17 维 + about_to_timeout（下一步再不吃就超时为 1）
     """
     from models.behavior_correctness import REASON_TO_IDX
 
@@ -232,6 +234,7 @@ def load_grid_sequences(
                     if ate_food == 0:
                         steps_counter += 1
                     steps_since_food = min(steps_counter / 80.0, 1.0)
+                    about_to_timeout = 1.0 if steps_counter >= 79 else 0.0
                     is_dead = is_dead_last if i == len(raw_frames) - 1 else 0.0
                     if add_velocity and i > 0 and p is not None:
                         dx, dy = xc - p[0], yc - p[1]
@@ -245,7 +248,7 @@ def load_grid_sequences(
                         df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
                         dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
                         move_to_food = 0.0
-                    cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]
+                    cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2, about_to_timeout]
                     seq_cont.append(cont)
                     seq_hf.append(head_forward)
                 if len(seq_cont) < 2:
@@ -343,7 +346,7 @@ def main():
             batches_dir = ROOT / batches_dir
         samples, episode_keys = load_grid_sequences(batches_dir, add_velocity=not args.no_velocity)
         splits = None  # grid 无 split，后续按 episode 随机划分
-        base_cont_dim = 17
+        base_cont_dim = 18
         input_dim = args.input_dim or (base_cont_dim * frame_ctx if frame_ctx > 1 else base_cont_dim)
         print(f"从 grid 加载: {len(samples)} 条序列 (与 YOLO 路径同特征), base_cont_dim={base_cont_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
     else:
@@ -355,7 +358,7 @@ def main():
             print("请先运行: python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences")
             sys.exit(1)
         samples, episode_keys, splits = load_track_sequences(data_path, add_velocity=not args.no_velocity)
-        base_cont_dim = len(samples[0][0][0][0]) if samples else 17
+        base_cont_dim = len(samples[0][0][0][0]) if samples else 18
         input_dim = args.input_dim or (base_cont_dim * frame_ctx if frame_ctx > 1 else base_cont_dim)
         print(f"从 track_sequences 加载: {len(samples)} 条序列, base_cont_dim={base_cont_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
 
@@ -424,7 +427,7 @@ def main():
         return out
 
     class SeqDataset(Dataset):
-        def __init__(self, data, augment=False, frame_context_half=0, base_cont_dim=17):
+        def __init__(self, data, augment=False, frame_context_half=0, base_cont_dim=18):
             self.data = data
             self.augment = augment
             self.frame_half = frame_context_half
