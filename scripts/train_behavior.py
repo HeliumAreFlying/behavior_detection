@@ -80,17 +80,19 @@ def _head_forward_type_from_scene(scene: dict) -> list[int]:
 
 def load_track_sequences(
     path: Path, add_velocity: bool = True
-) -> tuple[list[tuple[list[list[float]], int, int, int]], list[tuple[str, int]]]:
+) -> tuple[list[tuple[list[list[float]], int, int, int]], list[tuple[str, int]], list[str] | None]:
     """
-    加载 track_sequences.json，返回 (samples, episode_keys)。
+    加载 track_sequences.json，返回 (samples, episode_keys, splits)。
     samples: [(features, label_idx, reason_idx, is_endpoint), ...]
-    episode_keys: 每条样本对应的 (batch, episode)，用于按 episode 划分 train/val
+    episode_keys: 每条样本对应的 (batch, episode)
+    splits: 每条样本的 "train" 或 "val"，若文件中无 split 则为 None（调用方按 episode 随机划分）
     """
     from models.behavior_correctness import REASON_TO_IDX
 
     data = json.loads(path.read_text(encoding="utf-8"))
     samples = []
     episode_keys = []
+    splits: list[str] = []
     for rec in data:
         feats = rec.get("features", [])
         if len(feats) < 2:
@@ -149,7 +151,10 @@ def load_track_sequences(
         is_endpoint = int(rec.get("is_endpoint", 1))
         samples.append(((seq_cont, seq_hf), label_idx, reason_idx, is_endpoint))
         episode_keys.append((rec.get("batch", ""), rec.get("episode", 0)))
-    return samples, episode_keys
+        splits.append(rec.get("split", ""))
+    # 若所有记录都有有效 split，返回 splits；否则返回 None 供调用方按 episode 随机划分
+    use_splits = splits if all(s in ("train", "val") for s in splits) else None
+    return samples, episode_keys, use_splits
 
 
 def load_grid_sequences(
@@ -331,6 +336,7 @@ def main():
         if not batches_dir.is_absolute():
             batches_dir = ROOT / batches_dir
         samples, episode_keys = load_grid_sequences(batches_dir, add_velocity=not args.no_velocity)
+        splits = None  # grid 无 split，后续按 episode 随机划分
         base_cont_dim = 17
         input_dim = args.input_dim or (base_cont_dim * frame_ctx if frame_ctx > 1 else base_cont_dim)
         print(f"从 grid 加载: {len(samples)} 条序列 (与 YOLO 路径同特征), base_cont_dim={base_cont_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
@@ -342,7 +348,7 @@ def main():
             print(f"文件不存在: {data_path}")
             print("请先运行: python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences")
             sys.exit(1)
-        samples, episode_keys = load_track_sequences(data_path, add_velocity=not args.no_velocity)
+        samples, episode_keys, splits = load_track_sequences(data_path, add_velocity=not args.no_velocity)
         base_cont_dim = len(samples[0][0][0][0]) if samples else 17
         input_dim = args.input_dim or (base_cont_dim * frame_ctx if frame_ctx > 1 else base_cont_dim)
         print(f"从 track_sequences 加载: {len(samples)} 条序列, base_cont_dim={base_cont_dim}, frame_ctx={frame_ctx}, input_dim={input_dim}")
@@ -351,16 +357,21 @@ def main():
         print("无有效样本")
         sys.exit(1)
 
-    # 按 episode 划分，避免同一局样本泄漏到 train/val
-    unique_eps = list(dict.fromkeys(episode_keys))
-    random.shuffle(unique_eps)
-    val_n = int(len(unique_eps) * args.val_ratio)
-    val_eps = set(unique_eps[:val_n])
-    train_samples = [s for s, ek in zip(samples, episode_keys) if ek not in val_eps]
-    val_samples = [s for s, ek in zip(samples, episode_keys) if ek in val_eps]
-    print(f"按 episode 划分: train {len(train_samples)} 条, val {len(val_samples)} 条 ({len(val_eps)} 个 val episode)")
+    # 优先使用数据中的 split（与 render_and_export / run_track_and_prepare 一致），否则按 episode 随机划分
+    if splits is not None:
+        train_samples = [s for s, sp in zip(samples, splits) if sp == "train"]
+        val_samples = [s for s, sp in zip(samples, splits) if sp == "val"]
+        print(f"使用数据中的 split 划分: train {len(train_samples)} 条, val {len(val_samples)} 条")
+    else:
+        unique_eps = list(dict.fromkeys(episode_keys))
+        random.shuffle(unique_eps)
+        val_n = int(len(unique_eps) * args.val_ratio)
+        val_eps = set(unique_eps[:val_n])
+        train_samples = [s for s, ek in zip(samples, episode_keys) if ek not in val_eps]
+        val_samples = [s for s, ek in zip(samples, episode_keys) if ek in val_eps]
+        print(f"按 episode 划分（数据无 split）: train {len(train_samples)} 条, val {len(val_samples)} 条 ({len(val_eps)} 个 val episode)")
     if not val_samples:
-        print("警告: 验证集为空，请减小 --val-ratio")
+        print("警告: 验证集为空，请减小 --val-ratio 或检查数据 split")
         sys.exit(1)
 
     # 类别权重：逆频率，用于 reason (7 类)

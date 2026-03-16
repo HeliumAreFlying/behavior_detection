@@ -11,7 +11,7 @@
 import json
 import sys
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -241,6 +241,10 @@ def _process_one_episode(args: tuple) -> tuple[int, list[dict]]:
     if not entries:
         return ki, []
 
+    # 与 render_and_export 的 train/val 一致：按该 episode 内帧的 split 众数作为整条序列的 split
+    splits_in_ep = [e.get("split", "train") for e in entries]
+    episode_split = Counter(splits_in_ep).most_common(1)[0][0] if splits_in_ep else "train"
+
     if from_labels:
         snake_seqs = extract_sequences_from_labels(entries, dataset_dir)
     else:
@@ -333,6 +337,7 @@ def _process_one_episode(args: tuple) -> tuple[int, list[dict]]:
                 "label": ann["label"],
                 "reason": ann["reason"],
                 "is_endpoint": 1,
+                "split": episode_split,
             })
 
         last_end = -1
@@ -349,6 +354,7 @@ def _process_one_episode(args: tuple) -> tuple[int, list[dict]]:
                         "label": "correct",
                         "reason": "in_progress",
                         "is_endpoint": 0,
+                        "split": episode_split,
                     })
             last_end = i
         if endpoint_frames:
@@ -364,6 +370,7 @@ def _process_one_episode(args: tuple) -> tuple[int, list[dict]]:
                         "label": "correct",
                         "reason": "in_progress",
                         "is_endpoint": 0,
+                        "split": episode_split,
                     })
 
     return ki, sequences

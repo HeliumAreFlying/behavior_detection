@@ -63,7 +63,7 @@ def main():
         data_path = Path(args.data)
         if not data_path.is_absolute():
             data_path = ROOT / data_path
-        samples, _ = load_track_sequences(data_path, add_velocity=True)
+        samples, _, _ = load_track_sequences(data_path, add_velocity=True)
 
     if args.limit > 0:
         samples = samples[: args.limit]

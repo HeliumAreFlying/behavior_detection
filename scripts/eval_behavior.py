@@ -1,185 +1,34 @@
 """
-对 batches / track_sequences 进行全量评估，输出 P、R、F1、mAP 等指标（类似 YOLO 评估格式）。
+对 track_sequences 进行全量评估，输出 P、R、F1、mAP 等指标（类似 YOLO 评估格式）。
+默认仅评估 val 集，与训练时的验证集一致，保证指标准确。
 
 用法:
-  # 从 track_sequences 评估（与训练格式完全一致）
   python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
-
-  # 从 batches 评估（需 dataset metadata 保证帧一致）
-  python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
+  python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --split all
 """
 
 import json
 import os
 import sys
 from pathlib import Path
-from collections import defaultdict
 
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-GRID_W = GRID_H = 15
 
-
-def _norm(x: float, size: int) -> float:
-    return (x + 0.5) / size
-
-
-def _head_forward_type_from_scene(scene: dict) -> list[int]:
-    """蛇头前方格子: 0=空, 1=自己身体, 2=其他蛇"""
-    snakes_data = scene.get("snakes", [])
-    if not snakes_data:
-        return []
-    result = []
-    for si, s in enumerate(snakes_data):
-        body = s.get("body", [])
-        if not body:
-            result.append(0)
-            continue
-        try:
-            hx, hy = int(body[0][0]), int(body[0][1])
-        except (IndexError, TypeError):
-            result.append(0)
-            continue
-        dx, dy = (1, 0)
-        if len(body) >= 2:
-            dx = int(body[0][0]) - int(body[1][0])
-            dy = int(body[0][1]) - int(body[1][1])
-        fx = ((hx + dx) % GRID_W + GRID_W) % GRID_W
-        fy = ((hy + dy) % GRID_H + GRID_H) % GRID_H
-        own_cells = {((int(p[0]) % GRID_W + GRID_W) % GRID_W, (int(p[1]) % GRID_H + GRID_H) % GRID_H) for p in body}
-        other_cells = set()
-        for sj, s2 in enumerate(snakes_data):
-            if sj == si:
-                continue
-            for p in s2.get("body", []):
-                try:
-                    gx = (int(p[0]) % GRID_W + GRID_W) % GRID_W
-                    gy = (int(p[1]) % GRID_H + GRID_H) % GRID_H
-                    other_cells.add((gx, gy))
-                except (IndexError, TypeError):
-                    pass
-        fwd = (fx, fy)
-        if fwd in own_cells:
-            result.append(1)
-        elif fwd in other_cells:
-            result.append(2)
-        else:
-            result.append(0)
-    return result
-
-
-def _scene_to_features(scene: dict) -> dict[int, dict]:
-    out = {}
-    for si, s in enumerate(scene.get("snakes", [])):
-        body = s.get("body", [])
-        food = s.get("food", [0, 0])
-        x2 = s.get("x2")
-        if not body:
-            continue
-        hx, hy = body[0][0] % GRID_W, body[0][1] % GRID_H
-        xc = _norm(hx, GRID_W)
-        yc = _norm(hy, GRID_H)
-        fx = _norm(int(food[0]) % GRID_W, GRID_W) if food else 0.0
-        fy = _norm(int(food[1]) % GRID_H, GRID_H) if food else 0.0
-        xx = _norm(int(x2[0]) % GRID_W, GRID_W) if x2 else 0.0
-        xy = _norm(int(x2[1]) % GRID_H, GRID_H) if x2 else 0.0
-        out[si] = {
-            "xc": xc, "yc": yc, "fx": fx, "fy": fy, "xx": xx, "xy": xy,
-            "has_x2": 1.0 if x2 else 0.0,
-            "x2_active": s.get("x2_active", False),
-            "score": s.get("score", 0),
-        }
-    return out
-
-
-def _infer_ate_from_scene(prev: dict | None, curr: dict) -> tuple[float, float]:
-    """从前后帧 scene 特征推断 ate_food, ate_x2"""
-    if prev is None:
-        return 0.0, 0.0
-    xc, yc = curr["xc"], curr["yc"]
-    fx, fy = curr["fx"], curr["fy"]
-    thresh = 0.02
-    def _d(ax, ay, bx, by): return (ax - bx) ** 2 + (ay - by) ** 2
-    ate_food = 0.0
-    pfx, pfy = prev["fx"], prev["fy"]
-    if (pfx or pfy) and _d(fx, fy, pfx, pfy) > thresh and _d(xc, yc, pfx, pfy) < thresh:
-        ate_food = 1.0
-    ate_x2 = 0.0
-    if prev.get("has_x2") and (not curr.get("has_x2") or _d(curr["xx"], curr["xy"], prev["xx"], prev["xy"]) > thresh):
-        pxx, pxy = prev["xx"], prev["xy"]
-        if (pxx or pxy) and _d(xc, yc, pxx, pxy) < thresh:
-            ate_x2 = 1.0
-    return ate_food, ate_x2
-
-
-def _build_seq_features(
-    scene_features: list[dict],
-    scenes: list[dict] | None,
-    input_dim: int,
-    last_frame_reasons: dict[int, str] | None = None,
-) -> dict[int, tuple[list[list[float]], list[int]]]:
-    """构建 17 维 cont + head_forward。scenes 用于计算 head_forward，None 时用 0。"""
-    snake_seqs: dict[int, tuple[list[list[float]], list[int]]] = {}
-    num_snakes = max(len(sf) for sf in scene_features) if scene_features else 0
-    last_t_per_snake: dict[int, int] = {}
-    for t, sf in enumerate(scene_features):
-        for si in sf:
-            last_t_per_snake[si] = t
-    for si in range(num_snakes):
-        seq_cont, seq_hf = [], []
-        steps_counter = 0
-        is_dead_last = 0.0
-        if last_frame_reasons and si in last_frame_reasons:
-            r = last_frame_reasons[si]
-            if r in ("self_collision", "snake_collision"):
-                is_dead_last = 1.0
-        for t, sf in enumerate(scene_features):
-            if si not in sf:
-                continue
-            f = sf[si]
-            xc, yc = f["xc"], f["yc"]
-            fx, fy, xx, xy = f["fx"], f["fy"], f["xx"], f["xy"]
-            has_x2 = f["has_x2"]
-            prev_f = scene_features[t - 1][si] if t > 0 and si in scene_features[t - 1] else None
-            ate_food, ate_x2 = _infer_ate_from_scene(prev_f, f)
-            ate_food_while_x2 = 1.0 if (ate_food and has_x2) else 0.0
-            head_forward = 0
-            if scenes and t < len(scenes):
-                hf_list = _head_forward_type_from_scene(scenes[t])
-                head_forward = int(hf_list[si]) if si < len(hf_list) else 0
-                head_forward = max(0, min(2, head_forward))
-            if ate_food:
-                steps_counter = 0
-            else:
-                steps_counter += 1
-            steps_since_food = min(steps_counter / 80.0, 1.0)
-            is_dead = is_dead_last if last_t_per_snake.get(si, -1) == t else 0.0
-            if t > 0 and si in scene_features[t - 1]:
-                prev = scene_features[t - 1][si]
-                dx, dy = xc - prev["xc"], yc - prev["yc"]
-            else:
-                dx, dy = 0.0, 0.0
-            df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
-            dx2 = min(((xx - xc) ** 2 + (xy - yc) ** 2) ** 0.5, 1.5) if has_x2 and (xx or xy) else 0.0
-            vel = (dx * dx + dy * dy) ** 0.5 or 1e-6
-            to_food = (fx - xc) * dx + (fy - yc) * dy
-            move_to_food = max(-1, min(1, to_food / vel)) if (fx or fy) else 0.0
-            cont = [xc, yc, dx, dy, fx, fy, xx, xy, has_x2, df, dx2, move_to_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]
-            seq_cont.append(cont)
-            seq_hf.append(head_forward)
-        if len(seq_cont) >= 2:
-            snake_seqs[si] = (seq_cont, seq_hf)
-    return snake_seqs
-
-
-def load_samples_from_track(path: Path, add_velocity: bool = True):
-    """从 track_sequences.json 加载样本，返回 (seqs_cont, seqs_hf, labels, reasons)。17 维 cont + head_forward。"""
+def load_samples_from_track(
+    path: Path, add_velocity: bool = True, split_filter: str | None = None
+):
+    """从 track_sequences.json 加载样本，返回 (seqs_cont, seqs_hf, labels, reasons)。
+    split_filter: 仅加载该 split（'train'/'val'），None 表示全部。
+    """
     from models.behavior_correctness import REASON_TO_IDX
     data = json.loads(path.read_text(encoding="utf-8"))
     seqs_cont, seqs_hf, labels, reasons = [], [], [], []
     for rec in data:
+        if split_filter is not None and rec.get("split") != split_filter:
+            continue
         feats = rec.get("features", [])
         if len(feats) < 2:
             continue
@@ -215,58 +64,6 @@ def load_samples_from_track(path: Path, add_velocity: bool = True):
     return seqs_cont, seqs_hf, labels, reasons
 
 
-def load_samples_from_batches(
-    batches_dir: Path, dataset_dir: Path | None, input_dim: int
-):
-    """从 batches 加载样本，返回 (seq_list, label_list, reason_list)。不跳帧，使用全帧。"""
-    from models.behavior_correctness import REASON_TO_IDX
-
-    metadata = None
-    if dataset_dir and (dataset_dir / "metadata.json").exists():
-        metadata = json.loads((dataset_dir / "metadata.json").read_text(encoding="utf-8"))
-        by_ep = defaultdict(list)
-        for m in metadata:
-            by_ep[(m["batch"], m["episode"])].append(m)
-        for k in by_ep:
-            by_ep[k].sort(key=lambda x: x["scene"])
-
-    seqs_cont, seqs_hf, labels, reasons = [], [], [], []
-    for bf in sorted(batches_dir.glob("batch_*.json")):
-        data = json.loads(bf.read_text(encoding="utf-8"))
-        for ep_idx, ep in enumerate(data.get("episodes", [])):
-            scenes = ep.get("scenes", [])
-            if not scenes:
-                continue
-            anns = ep.get("snake_annotations", [])
-            if not anns:
-                continue
-
-            if input_dim == 12 and metadata:
-                entries = by_ep.get((bf.name, ep_idx), [])
-                entries.sort(key=lambda x: x["scene"])
-                scene_indices = [e["scene"] for e in entries]
-                if not scene_indices:
-                    continue
-                scene_features = [_scene_to_features(scenes[i]) for i in scene_indices if i < len(scenes)]
-                scenes_sub = [scenes[i] for i in scene_indices if i < len(scenes)]
-            else:
-                scene_features = [_scene_to_features(sc) for sc in scenes]
-                scenes_sub = scenes
-
-            last_reasons = {si: anns[si].get("reason", "in_progress") for si in range(len(anns)) if si < len(anns)}
-            snake_seqs = _build_seq_features(scene_features, scenes_sub, input_dim, last_frame_reasons=last_reasons)
-            for si, (seq_c, seq_h) in snake_seqs.items():
-                if si >= len(anns):
-                    continue
-                ann = anns[si]
-                seqs_cont.append(seq_c)
-                seqs_hf.append(seq_h)
-                labels.append(1 if ann.get("label") == "incorrect" else 0)
-                reasons.append(REASON_TO_IDX.get(ann.get("reason", "in_progress"), REASON_TO_IDX["in_progress"]))
-
-    return seqs_cont, seqs_hf, labels, reasons
-
-
 def main():
     import argparse
     import torch
@@ -274,8 +71,9 @@ def main():
 
     p = argparse.ArgumentParser(description="行为模型全量评估")
     p.add_argument("-c", "--model", required=True, help="行为模型 checkpoint")
-    p.add_argument("-d", "--data", default="", help="track_sequences.json 或 dataset 目录（与 -b 联用）")
-    p.add_argument("-b", "--batches", default="", help="batches 目录；指定时从 batch 评估，否则 -d 需为 track_sequences.json")
+    p.add_argument("-d", "--data", required=True, help="track_sequences.json 路径")
+    p.add_argument("--split", choices=["train", "val", "all"], default="val",
+                   help="评估集合：val=仅验证集(默认,与训练一致), train=仅训练集, all=全部")
     p.add_argument("--no-velocity", action="store_true", help="track 数据不加速度特征")
     p.add_argument("--max-samples", type=int, default=0, help="最多评估样本数，0=全部")
     p.add_argument("--incorrect-threshold", type=float, default=0.5,
@@ -320,31 +118,25 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    if args.batches:
-        batches_dir = Path(args.batches)
-        if not batches_dir.is_absolute():
-            batches_dir = ROOT / batches_dir
-        dataset_dir = Path(args.data) if args.data else None
-        if dataset_dir and not dataset_dir.is_absolute():
-            dataset_dir = ROOT / dataset_dir
-        print(f"从 batches 加载 (input_dim={input_dim})...")
-        seqs_cont, seqs_hf, gt_labels, gt_reasons = load_samples_from_batches(
-            batches_dir, dataset_dir, input_dim
-        )
-    else:
-        data_path = Path(args.data)
-        if not data_path.is_absolute():
-            data_path = ROOT / data_path
-        if not data_path.exists():
-            print(f"数据不存在: {data_path}")
-            sys.exit(1)
-        print(f"从 track_sequences 加载 (input_dim={input_dim})...")
-        seqs_cont, seqs_hf, gt_labels, gt_reasons = load_samples_from_track(data_path, add_velocity=not args.no_velocity)
-        if input_dim == 8:
-            print("WARN: track_sequences 通常为 12 维，请确认模型 input_dim")
+    data_path = Path(args.data)
+    if not data_path.is_absolute():
+        data_path = ROOT / data_path
+    if not data_path.exists():
+        print(f"数据不存在: {data_path}")
+        sys.exit(1)
+    split_filter = None if args.split == "all" else args.split
+    print(f"从 track_sequences 加载 (input_dim={input_dim}, split={args.split})...")
+    seqs_cont, seqs_hf, gt_labels, gt_reasons = load_samples_from_track(
+        data_path, add_velocity=not args.no_velocity, split_filter=split_filter
+    )
+    if input_dim == 8:
+        print("WARN: track_sequences 通常为 12 维，请确认模型 input_dim")
 
     if not seqs_cont:
-        print("无有效样本")
+        if split_filter is not None:
+            print(f"未找到 split={split_filter!r} 的样本；若数据为旧版无 split，请使用 --split all 或重新运行 run_track_and_prepare 生成带 split 的数据")
+        else:
+            print("无有效样本")
         sys.exit(1)
 
     if args.max_samples > 0:
