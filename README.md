@@ -17,7 +17,7 @@ flowchart TB
     B -->|视觉路径| D
     C --> D
 
-    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧16维特征, 输入label或YOLO track"]
+    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧17维+蛇头前方格(4类), 输入label或YOLO track"]
     D --> E
 
     E["5. 行为正确性 train_behavior 双向LSTM+注意力<br/>correct/incorrect + reason 共7类"]
@@ -37,16 +37,17 @@ flowchart TB
 | 5. 行为训练 | `train_behavior.py` | sequences（按 `split` 划分 train/val）或 grid | `checkpoints/behavior/best.pt` |
 | 6. 视频演示 | `demo_video.py` | batch + 模型权重 | 带标注的 MP4 视频 |
 
-### 16 维基础特征 + 3 帧上下文（行为模型输入）
+### 17 维连续特征 + 蛇头前方一格（4 类）+ 3 帧上下文（行为模型输入）
 
 **特征约束**：仅使用 YOLO 能从图像检测到的信息（head/food/x2 位置），grid 与 track 两种路径完全一致。
 
-每帧每蛇基础特征：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2, is_dead, steps_since_food]`
+每帧每蛇**连续特征**（17 维）：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]`
 
 - `ate_food` / `ate_x2`：由连续帧 head/food/x2 位置推导，YOLO 推理时同样可计算
 - `is_dead`：蛇是否已撞击死亡（YOLO 5 类时 class 4=`snake_head_dead` 表示圆形蛇头，label 路径从解析结果读取）
 - `steps_since_food`：自上次吃食物以来的帧数，归一化 `min(count/80, 1.0)`
-- 训练时默认将**前后共 3 帧**（1 前 + 当前 + 1 后）合并为 1 帧输入（3×16=48 维）
+- **蛇头前方一格**（离散，Embedding 输入）：0=空，1=自己身体，2=其他蛇身体，3=其他蛇头；用于区分 self_collision / snake_collision 及碰撞部位
+- 训练时默认将**前后共 3 帧**（1 前 + 当前 + 1 后）合并为 1 帧输入（3×17=51 维 + head_forward 嵌入）
 
 ---
 
@@ -109,8 +110,8 @@ python data_generator.py
 # 自定义参数（支持多进程加速）
 python data_generator.py --batches 100 --batch-size 100 --output my_data --mistake-rate 0.2
 
-# 使用 8 个进程并行生成
-python data_generator.py -b 100 -s 100 -w 8
+# 使用 12 个进程并行生成
+python data_generator.py -b 100 -s 100 -w 12
 ```
 
 | 参数 | 默认 | 说明 |
@@ -130,7 +131,7 @@ python data_generator.py -b 100 -s 100 -w 8
 
 | 步骤 | 命令 | 说明 |
 |------|------|------|
-| 1 | 数据生成 | 多进程 `-w 8` 加速 |
+| 1 | 数据生成 | 多进程 `-w 12` 加速 |
 | 2 | 渲染导出 | 640×640，全帧不跳帧 |
 | 3 | YOLO 训练 | 可选，5 类含 snake_head_dead |
 | 4 | 序列准备 | 路径 A 纯 label / 路径 B YOLO 跟踪 |
@@ -139,18 +140,18 @@ python data_generator.py -b 100 -s 100 -w 8
 | 7 | 演示视频 | `-d dataset` 与训练帧一致；`--draw-boxes` 绘制 YOLO 框 |
 
 ```bash
-# 1. 数据生成（-w 8 多进程）
-python data_generator.py --batches 10 --batch-size 100 -w 8
+# 1. 数据生成（-w 12 多进程）
+python data_generator.py --batches 10 --batch-size 100 -w 12
 
-# 2. 渲染与导出 YOLO 数据集（640×640，全帧；-w 8 多进程）
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
+# 2. 渲染与导出 YOLO 数据集（640×640，全帧；-w 12 多进程）
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 12
 
 # 3. (可选) YOLO 训练（5 类：snake_head, snake_body, food, x2, snake_head_dead；imgsz 与渲染一致）
 yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 
 # 4. 序列准备（二选一）
-# 路径 A：纯 label，无需 YOLO（-w 8 多进程）
-python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
+# 路径 A：纯 label，无需 YOLO（-w 12 多进程）
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 12
 
 # 路径 B：YOLO 跟踪（需先完成步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
@@ -183,17 +184,17 @@ python replay_ui.py
 ### 3. 渲染与导出 YOLO 数据集
 
 ```bash
-# 640×640 全帧导出（不跳帧），多进程：-w 8
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
+# 640×640 全帧导出（不跳帧），多进程：-w 12
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 12
 ```
 
-输出 `dataset/train`、`dataset/val`（640×640 images + labels + metadata.json）。`run_track_and_prepare` 会据此为每条序列写入 `split`，训练与评估的 train/val 与 dataset 一致。蛇头视觉：开局菱形、前进三角(尖指方向)、撞击圆形。
+输出 `dataset/train`、`dataset/val`（640×640 images + labels + metadata.json）。划分按**局（episode）**：约 `--val-ratio` 比例的局整局进入 val，保证验证集样本量合理。`run_track_and_prepare` 会据此为每条序列写入 `split`，训练与评估的 train/val 与 dataset 一致。蛇头视觉：开局菱形、前进三角(尖指方向)、撞击圆形。
 
 ### 4. 序列准备（二选一）
 
 ```bash
-# 纯 label：直接从 YOLO label 提取蛇头，无需运行 YOLO（-w 8 多进程）
-python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
+# 纯 label：直接从 YOLO label 提取蛇头，无需运行 YOLO（-w 12 多进程）
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 12
 
 # YOLO 跟踪：需先训练 YOLO，再跑 track（GPU 时默认单进程）
 python scripts/run_track_and_prepare.py -m yolov8n.pt -d dataset -o sequences

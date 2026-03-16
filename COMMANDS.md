@@ -4,9 +4,9 @@
 
 | 脚本 | 多进程 | 错误检测相关 |
 |------|--------|--------------|
-| `data_generator.py` | `-w 8` | - |
-| `render_and_export.py` | `-w 8` | - |
-| `run_track_and_prepare.py` | `-w 8`（from-labels 时） | - |
+| `data_generator.py` | `-w 12` | - |
+| `render_and_export.py` | `-w 12` | - |
+| `run_track_and_prepare.py` | `-w 12`（from-labels 时） | - |
 | `train_behavior.py` | `--patience 50` 早停 | `--best-metric reason_f1` 稳健选 best；`--boost-incorrect`；`--no-bidirectional --no-attention` |
 | `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认仅评估 **val** 集（`--split val`）；`--split all` 评估全部；`--no-threshold-search` 固定阈值；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
@@ -20,18 +20,18 @@
 渲染 640×640；蛇头：开局菱形 → 三角(尖指) → 撞击圆形。行为模型：双向 LSTM + 注意力。
 
 ```bash
-# 1. 数据生成（-w 8 多进程）
-python data_generator.py --batches 10 --batch-size 100 -w 8
+# 1. 数据生成（-w 12 多进程）
+python data_generator.py --batches 10 --batch-size 100 -w 12
 
-# 2. 渲染与导出（640×640 全帧，-w 8 多进程）
-python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
+# 2. 渲染与导出（640×640 全帧，-w 12 多进程）
+python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 12
 
 # 3. (可选) YOLO 训练（imgsz=640 与渲染一致）
 yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=128
 
 # 4. 序列准备
-# 路径 A：纯 label（-w 8）
-python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
+# 路径 A：纯 label（-w 12）
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 12
 
 # 路径 B：YOLO 跟踪（需步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
@@ -55,16 +55,18 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -c checkpoints/beh
 python data_generator.py
 
 # 多进程加速
-python data_generator.py -b 100 -s 100 -w 8
+python data_generator.py -b 100 -s 100 -w 12
 ```
 
 ## 2. 渲染与导出（640×640，支持多进程 `-w`）
+
+划分按**局（episode）**：`--val-ratio 0.2` 表示约 20% 的局整局进入 val，避免按帧划分导致 val 样本过少。
 
 ```bash
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2
 
 # 多进程加速
-python scripts/render_and_export.py --batches batches/ -o dataset -w 8
+python scripts/render_and_export.py --batches batches/ -o dataset -w 12
 ```
 
 ## 3. 预览标注
@@ -81,11 +83,11 @@ yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=12
 
 ## 5. 序列准备（二选一，支持多进程 `-w`）
 
-生成的 `track_sequences.json` 中每条序列带 `split`（train/val），与 `render_and_export` 的 dataset 划分一致，供训练与评估使用。
+生成的 `track_sequences.json` 中每条序列带 `split`（train/val），与 `render_and_export` 按局划分的 dataset 一致；每帧含 `head_forward_type`（0=空/1=己身/2=他蛇身体/3=他蛇头），供训练与评估使用。
 
 ```bash
 # 纯 label（多进程）
-python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 8
+python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w 12
 ```
 
 ```bash
