@@ -78,9 +78,9 @@ def main():
     p.add_argument("--no-velocity", action="store_true", help="track 数据不加速度特征")
     p.add_argument("--max-samples", type=int, default=0, help="最多评估样本数，0=全部")
     p.add_argument("--incorrect-threshold", type=float, default=0.5,
-                   help="预测 incorrect 的阈值（仅在 --no-threshold-search 时生效）")
+                   help="预测 incorrect 的阈值。默认会进行阈值搜索，此参数被忽略；仅加 --no-threshold-search 时才会使用本参数")
     p.add_argument("--no-threshold-search", action="store_true",
-                   help="不自动搜索阈值时使用 --incorrect-threshold；否则按 mAP 最大选取阈值")
+                   help="不搜索阈值，直接使用 --incorrect-threshold 作为阈值（否则在 0.15~0.85 内按 mAP 最大选取）")
     p.add_argument("--reason-override", action="store_true",
                    help="若预测 reason 为错误类(self_collision/snake_collision/x2_wasted/timeout)，强制 label=incorrect")
     p.add_argument("--batch-size", type=int, default=128,
@@ -278,7 +278,12 @@ def main():
     p, r, f1, _ = precision_recall_fscore_support(
         gt_labels, pred_labels, labels=[0, 1], average=None, zero_division=0
     )
-    suffix = "  (无阈值满足 F1≥{:.0%}，已按 F1 最大选取)".format(MIN_BINARY_F1) if used_f1_fallback else ""
+    parts = []
+    if used_f1_fallback:
+        parts.append("(无阈值满足 F1≥{:.0%}，已按 F1 最大选取)".format(MIN_BINARY_F1))
+    if do_search and args.incorrect_threshold != best_thresh:
+        parts.append("(阈值由搜索选取，未使用 --incorrect-threshold)")
+    suffix = "  " + " ".join(parts) if parts else ""
     print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  mAP={best_score:.4f}  P={p[1]:.4f}  R={r[1]:.4f}  F1={f1[1]:.4f}{suffix}")
     # 在最优阈值下的有效 reason：correct 样本视为 in_progress(2)，用于下表
     effective_reason = np.where(pred_labels == 0, 2, pred_reasons_arr)
