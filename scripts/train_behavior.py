@@ -547,7 +547,7 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("最优模型选取: 固定 mAP（7 类 AP 均值）  |  早停 patience={}".format(args.patience))
+    print("最优模型选取: mAP  |  早停 patience={}".format(args.patience))
 
     best_val_f1 = 0.0
     best_epoch = 0
