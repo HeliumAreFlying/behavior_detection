@@ -243,15 +243,32 @@ def main():
                 ap_per.append(average_precision_score(y_bin[:, c], effective_probs[:, c]))
         return float(np.mean(ap_per)) if ap_per else 0.0
 
+    # 在「binary F1 ≥ 下限」约束下最大化 mAP，避免退化解（阈值过小/过大导致几乎全判为一类）
+    MIN_BINARY_F1 = 0.25
     best_thresh = args.incorrect_threshold
     best_score = 0.0
+    best_f1_fallback = 0.0
+    best_thresh_f1_fallback = 0.5
+    used_f1_fallback = False
     do_search = not args.no_threshold_search
     if do_search:
         for t in np.arange(0.01, 1.0, 0.01):
-            score = _mAP_at_thresh(t)
-            if score > best_score:
-                best_score = score
+            pred_b = _pred_at_thresh(prob_incorrect, pred_reasons_arr, t)
+            p_t, r_t, f1_t, _ = precision_recall_fscore_support(
+                gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0
+            )
+            binary_f1 = float(f1_t[1]) if gt_labels.sum() > 0 else 0.0
+            mAP_t = _mAP_at_thresh(t)
+            if binary_f1 >= MIN_BINARY_F1 and mAP_t > best_score:
+                best_score = mAP_t
                 best_thresh = t
+            if binary_f1 > best_f1_fallback:
+                best_f1_fallback = binary_f1
+                best_thresh_f1_fallback = t
+        if best_score == 0.0:
+            best_thresh = best_thresh_f1_fallback
+            best_score = _mAP_at_thresh(best_thresh)
+            used_f1_fallback = True
     else:
         best_thresh = args.incorrect_threshold
         best_score = _mAP_at_thresh(best_thresh)
@@ -260,7 +277,8 @@ def main():
     p, r, f1, _ = precision_recall_fscore_support(
         gt_labels, pred_labels, labels=[0, 1], average=None, zero_division=0
     )
-    print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  mAP={best_score:.4f}  P={p[1]:.4f}  R={r[1]:.4f}  F1={f1[1]:.4f}")
+    suffix = "  (无阈值满足 F1≥{:.0%}，已按 F1 最大选取)".format(MIN_BINARY_F1) if used_f1_fallback else ""
+    print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  mAP={best_score:.4f}  P={p[1]:.4f}  R={r[1]:.4f}  F1={f1[1]:.4f}{suffix}")
     # 在最优阈值下的有效 reason：correct 样本视为 in_progress(2)，用于下表
     effective_reason = np.where(pred_labels == 0, 2, pred_reasons_arr)
     effective_probs_final = np.zeros_like(pred_probs)
