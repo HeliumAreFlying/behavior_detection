@@ -587,6 +587,7 @@ def main():
         val_preds, val_labels = [], []
         val_reason_preds, val_reason_labels = [], []
         val_reason_probs_list = []
+        val_prob_incorrect_list = []
         with torch.no_grad():
             for x, x_hf, lengths, y_label, y_reason, y_ep in val_loader:
                 x, x_hf = x.to(device), x_hf.to(device)
@@ -605,23 +606,33 @@ def main():
                     val_reason_labels.extend(r_gt.tolist())
                     prob_r = torch.softmax(logits_r[mask], dim=1).cpu().numpy()
                     val_reason_probs_list.append(prob_r)
+                    prob_incorrect = torch.softmax(logits_c[mask], dim=1).cpu().numpy()[:, 1]
+                    val_prob_incorrect_list.append(prob_incorrect)
 
         binary_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
         reason_f1 = f1_score(val_reason_labels, val_reason_preds, average="macro", zero_division=0) if val_reason_preds else 0.0
-        # 固定策略: mAP（7 类 AP 的均值）
+        # 与 eval_behavior 一致：在固定阈值 0.5 下构造 effective reason 再算 mAP，便于与评估脚本对比
         from sklearn.metrics import average_precision_score
         from sklearn.preprocessing import label_binarize
         from models.behavior_correctness import NUM_REASONS
         if val_reason_probs_list:
             val_reason_probs = np.concatenate(val_reason_probs_list, axis=0)
+            val_prob_incorrect = np.concatenate(val_prob_incorrect_list, axis=0)
             val_reason_labels_arr = np.array(val_reason_labels)
             y_bin = label_binarize(val_reason_labels_arr, classes=range(NUM_REASONS))
+            pred_b = (val_prob_incorrect >= 0.5).astype(np.int64)
+            effective_probs = np.zeros_like(val_reason_probs)
+            for i in range(len(pred_b)):
+                if pred_b[i] == 0:
+                    effective_probs[i, 2] = 1.0
+                else:
+                    effective_probs[i, :] = val_reason_probs[i, :]
             ap_per_class = []
             for c in range(NUM_REASONS):
                 if y_bin[:, c].sum() == 0:
                     ap_per_class.append(0.0)
                 else:
-                    ap = average_precision_score(y_bin[:, c], val_reason_probs[:, c])
+                    ap = average_precision_score(y_bin[:, c], effective_probs[:, c])
                     ap_per_class.append(ap)
             select_score = float(np.mean(ap_per_class)) if ap_per_class else 0.0
         else:
