@@ -165,6 +165,102 @@ def load_track_sequences(
     return samples, episode_keys, use_splits
 
 
+def _merge_frame_context_cont_module(seq: list, base_dim: int, half: int) -> list:
+    """将前后各 half 帧并入当前帧。seq 每项 base_dim 维，输出每项 base_dim*(2*half+1) 维。"""
+    if half <= 0:
+        return seq
+    n = len(seq)
+    out = []
+    for i in range(n):
+        ctx = []
+        for j in range(i - half, i + half + 1):
+            idx = max(0, min(n - 1, j))
+            ctx.extend(seq[idx])
+        out.append(ctx)
+    return out
+
+
+class SeqDatasetForVal:
+    """与训练 val 完全一致的验证集 Dataset：仅做 frame context 合并，不做增强。供 eval 与训练共用。"""
+    def __init__(self, data: list, frame_context_half: int = 0, base_cont_dim: int = 18):
+        self.data = data
+        self.frame_half = frame_context_half
+        self.base_cont_dim = base_cont_dim
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, i):
+        (seq_cont, seq_hf), label, reason, is_ep = self.data[i]
+        seq_cont = [list(x) for x in seq_cont]
+        if self.frame_half > 0:
+            seq_cont = _merge_frame_context_cont_module(seq_cont, self.base_cont_dim, self.frame_half)
+        import torch
+        return torch.tensor(seq_cont, dtype=torch.float32), torch.tensor(seq_hf, dtype=torch.long), label, reason, is_ep
+
+
+def _collate_val(batch):
+    import torch
+    import torch.nn as nn
+    conts, hfs, labels, reasons, is_eps = zip(*batch)
+    lengths = torch.tensor([c.size(0) for c in conts])
+    padded_cont = nn.utils.rnn.pad_sequence(conts, batch_first=True, padding_value=0)
+    padded_hf = nn.utils.rnn.pad_sequence(hfs, batch_first=True, padding_value=0)
+    labels = torch.tensor(labels, dtype=torch.long)
+    reasons = torch.tensor(reasons, dtype=torch.long)
+    is_endpoints = torch.tensor(is_eps, dtype=torch.float32).unsqueeze(1)
+    return padded_cont, padded_hf, lengths, labels, reasons, is_endpoints
+
+
+def build_track_val_loader(
+    data_path: Path,
+    batch_size: int,
+    add_velocity: bool = True,
+    input_dim: int = 54,
+    base_cont_dim: int = 18,
+    frame_ctx: int = 3,
+):
+    """构建与训练时完全一致的 val DataLoader（track_sequences + split=val）。供 eval_behavior 复用，保证 mAP 一致。"""
+    from torch.utils.data import DataLoader
+    samples, _, splits = load_track_sequences(data_path, add_velocity=add_velocity)
+    if not samples or not splits or not all(s in ("train", "val") for s in splits):
+        return None, None
+    val_samples = [s for s, sp in zip(samples, splits) if sp == "val"]
+    if not val_samples:
+        return None, None
+    half = (frame_ctx // 2) if frame_ctx > 1 else 0
+    ds = SeqDatasetForVal(val_samples, frame_context_half=half, base_cont_dim=base_cont_dim)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=_collate_val, num_workers=0)
+    return loader, val_samples
+
+
+def run_val_inference(model, val_loader, device):
+    """与训练时验证循环一致：带 mask (y_ep>0.5)，返回 (prob_incorrect, reason_probs, labels, reasons) 四个数组。"""
+    import torch
+    import numpy as np
+    prob_incorrect_list, reason_probs_list, labels_list, reasons_list = [], [], [], []
+    model.eval()
+    with torch.no_grad():
+        for x, x_hf, lengths, y_label, y_reason, y_ep in val_loader:
+            x, x_hf = x.to(device), x_hf.to(device)
+            lengths = lengths.to(device)
+            y_label, y_reason, y_ep = y_label.to(device), y_reason.to(device), y_ep.to(device)
+            logits_c, logits_r = model(x, lengths, x_head_forward=x_hf)
+            mask = (y_ep > 0.5).squeeze(1)
+            if mask.any():
+                prob_r = torch.softmax(logits_r[mask], dim=1).cpu().numpy()
+                prob_incorrect = torch.softmax(logits_c[mask], dim=1).cpu().numpy()[:, 1]
+                prob_incorrect_list.append(prob_incorrect)
+                reason_probs_list.append(prob_r)
+                labels_list.append(y_label[mask].cpu().numpy())
+                reasons_list.append(y_reason[mask].cpu().numpy())
+    prob_incorrect = np.concatenate(prob_incorrect_list, axis=0) if prob_incorrect_list else np.array([])
+    reason_probs = np.concatenate(reason_probs_list, axis=0) if reason_probs_list else np.array([])
+    labels = np.concatenate(labels_list, axis=0) if labels_list else np.array([])
+    reasons = np.concatenate(reasons_list, axis=0) if reasons_list else np.array([])
+    return prob_incorrect, reason_probs, labels, reasons
+
+
 def load_grid_sequences(
     batches_dir: Path, add_velocity: bool = True
 ) -> tuple[list[tuple[list[list[float]], int, int, int]], list[tuple[str, int]]]:
@@ -495,15 +591,16 @@ def main():
         collate_fn=collate,
         num_workers=0,
     )
+    # 与 eval_behavior 一致：val 使用 SeqDatasetForVal + _collate_val，保证评估指标准确一致
     val_loader = DataLoader(
-        SeqDataset(
-            val_samples, augment=False,
+        SeqDatasetForVal(
+            val_samples,
             frame_context_half=half if frame_ctx > 1 else 0,
             base_cont_dim=base_cont_dim,
         ),
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collate,
+        collate_fn=_collate_val,
         num_workers=0,
     )
 

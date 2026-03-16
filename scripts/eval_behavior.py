@@ -18,16 +18,21 @@ sys.path.insert(0, str(ROOT))
 
 
 def load_samples_from_track(
-    path: Path, add_velocity: bool = True, split_filter: str | None = None
+    path: Path, add_velocity: bool = True, split_filter: str | None = None,
+    endpoint_only: bool = True,
 ):
-    """从 track_sequences.json 加载样本，返回 (seqs_cont, seqs_hf, labels, reasons)。
+    """从 track_sequences.json 加载样本，返回 (seqs_cont, seqs_hf, labels, reasons, is_endpoints)。
     split_filter: 仅加载该 split（'train'/'val'），None 表示全部。
+    endpoint_only: 若 True，只加载 is_endpoint=1 的样本，与训练时 val mask (y_ep>0.5) 一致，保证评估与训练指标准确一致。
     """
     from models.behavior_correctness import REASON_TO_IDX
     data = json.loads(path.read_text(encoding="utf-8"))
-    seqs_cont, seqs_hf, labels, reasons = [], [], [], []
+    seqs_cont, seqs_hf, labels, reasons, is_endpoints = [], [], [], [], []
     for rec in data:
         if split_filter is not None and rec.get("split") != split_filter:
+            continue
+        is_ep = int(rec.get("is_endpoint", 1))
+        if endpoint_only and is_ep != 1:
             continue
         feats = rec.get("features", [])
         if len(feats) < 2:
@@ -62,7 +67,8 @@ def load_samples_from_track(
         seqs_hf.append(seq_h)
         labels.append(1 if rec.get("label") == "incorrect" else 0)
         reasons.append(REASON_TO_IDX.get(rec.get("reason", "in_progress"), REASON_TO_IDX["in_progress"]))
-    return seqs_cont, seqs_hf, labels, reasons
+        is_endpoints.append(is_ep)
+    return seqs_cont, seqs_hf, labels, reasons, is_endpoints
 
 
 def main():
@@ -126,82 +132,111 @@ def main():
         print(f"数据不存在: {data_path}")
         sys.exit(1)
     split_filter = None if args.split == "all" else args.split
-    print(f"从 track_sequences 加载 (input_dim={input_dim}, split={args.split})...")
-    seqs_cont, seqs_hf, gt_labels, gt_reasons = load_samples_from_track(
-        data_path, add_velocity=not args.no_velocity, split_filter=split_filter
-    )
-    if input_dim == 8:
-        print("WARN: track_sequences 通常为 12 维，请确认模型 input_dim")
-
-    if not seqs_cont:
-        if split_filter is not None:
-            print(f"未找到 split={split_filter!r} 的样本；若数据为旧版无 split，请使用 --split all 或重新运行 run_track_and_prepare 生成带 split 的数据")
-        else:
-            print("无有效样本")
-        sys.exit(1)
-
-    if args.max_samples > 0:
-        seqs_cont = seqs_cont[: args.max_samples]
-        seqs_hf = seqs_hf[: args.max_samples]
-        gt_labels = gt_labels[: args.max_samples]
-        gt_reasons = gt_reasons[: args.max_samples]
-    print(f"共 {len(seqs_cont)} 条样本")
-
     base_cont_dim = 18 if use_head_forward_embedding else 16
-    if not use_head_forward_embedding and seqs_cont and len(seqs_cont[0][0]) > 16:
-        seqs_cont = [[f[:16] for f in seq] for seq in seqs_cont]
     frame_ctx = input_dim // base_cont_dim if input_dim >= base_cont_dim and input_dim % base_cont_dim == 0 else 1
-    half = frame_ctx // 2
 
-    def _merge_frame_context(seqs: list, base_dim: int) -> list:
-        if half <= 0:
-            return seqs
-        out = []
-        for seq in seqs:
-            n = len(seq)
-            merged = []
-            for i in range(n):
-                ctx = []
-                for j in range(i - half, i + half + 1):
-                    idx = max(0, min(n - 1, j))
-                    ctx.extend(seq[idx])
-                merged.append(ctx)
-            out.append(merged)
-        return out
-
-    if half > 0:
-        seqs_cont = _merge_frame_context(seqs_cont, base_cont_dim)
-
-    pred_reasons, prob_incorrect_list, pred_reason_probs = [], [], []
-    batch_size = args.batch_size
-    n = len(seqs_cont)
-    use_hf = ckpt.get("use_head_forward_embedding", False)
-    with torch.inference_mode():
-        for start in range(0, n, batch_size):
-            batch_cont = seqs_cont[start : start + batch_size]
-            batch_hf = seqs_hf[start : start + batch_size]
-            lengths = torch.tensor([len(s) for s in batch_cont], dtype=torch.long)
-            padded_cont = torch.nn.utils.rnn.pad_sequence(
-                [torch.tensor(s, dtype=torch.float32) for s in batch_cont],
-                batch_first=True,
-                padding_value=0.0,
+    # 默认 val：使用与训练完全一致的 DataLoader + mask 推理，保证 mAP 与训练一致
+    use_train_val_path = args.split == "val"
+    if use_train_val_path:
+        import scripts.train_behavior as train_behavior
+        val_loader, _ = train_behavior.build_track_val_loader(
+            data_path, batch_size=args.batch_size, add_velocity=not args.no_velocity,
+            input_dim=input_dim, base_cont_dim=base_cont_dim, frame_ctx=frame_ctx,
+        )
+        if val_loader is not None:
+            prob_incorrect, pred_probs, gt_labels, gt_reasons_arr = train_behavior.run_val_inference(
+                model, val_loader, device
             )
-            padded_hf = torch.nn.utils.rnn.pad_sequence(
-                [torch.tensor(s, dtype=torch.long) for s in batch_hf],
-                batch_first=True,
-                padding_value=0,
-            )
-            x = padded_cont.to(device)
-            x_hf = padded_hf.to(device) if use_hf else None
-            lengths = lengths.to(device)
-            logits_c, logits_r = model(x, lengths, x_head_forward=x_hf)
-            prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()
-            pred_r = logits_r.argmax(1).cpu().numpy()
-            prob_r = torch.softmax(logits_r, dim=1).cpu().numpy()
-            for i in range(len(batch_cont)):
-                pred_reasons.append(int(pred_r[i]))
-                prob_incorrect_list.append(float(prob_c[i, 1]))
-                pred_reason_probs.append(prob_r[i])
+            gt_labels = np.array(gt_labels)
+            gt_reasons_arr = np.array(gt_reasons_arr)
+            pred_reasons_arr = np.argmax(pred_probs, axis=1)
+            if args.max_samples > 0 and len(gt_labels) > args.max_samples:
+                prob_incorrect = prob_incorrect[: args.max_samples]
+                pred_probs = pred_probs[: args.max_samples]
+                gt_labels = gt_labels[: args.max_samples]
+                gt_reasons_arr = gt_reasons_arr[: args.max_samples]
+                pred_reasons_arr = pred_reasons_arr[: args.max_samples]
+            print(f"使用与训练一致的 val 流程 (DataLoader+mask)，共 {len(gt_labels)} 条样本")
+            use_train_val_path = True
+        else:
+            use_train_val_path = False
+
+    if not use_train_val_path:
+        print(f"从 track_sequences 加载 (input_dim={input_dim}, split={args.split})...")
+        seqs_cont, seqs_hf, gt_labels, gt_reasons, _ = load_samples_from_track(
+            data_path, add_velocity=not args.no_velocity, split_filter=split_filter, endpoint_only=True
+        )
+        if input_dim == 8:
+            print("WARN: track_sequences 通常为 12 维，请确认模型 input_dim")
+        if not seqs_cont:
+            if split_filter is not None:
+                print(f"未找到 split={split_filter!r} 的样本；若数据为旧版无 split，请使用 --split all 或重新运行 run_track_and_prepare 生成带 split 的数据")
+            else:
+                print("无有效样本")
+            sys.exit(1)
+        if args.max_samples > 0:
+            seqs_cont = seqs_cont[: args.max_samples]
+            seqs_hf = seqs_hf[: args.max_samples]
+            gt_labels = gt_labels[: args.max_samples]
+            gt_reasons = gt_reasons[: args.max_samples]
+        print(f"共 {len(seqs_cont)} 条样本")
+        half = frame_ctx // 2
+
+        def _merge_frame_context(seqs: list, base_dim: int) -> list:
+            if half <= 0:
+                return seqs
+            out = []
+            for seq in seqs:
+                n = len(seq)
+                merged = []
+                for i in range(n):
+                    ctx = []
+                    for j in range(i - half, i + half + 1):
+                        idx = max(0, min(n - 1, j))
+                        ctx.extend(seq[idx])
+                    merged.append(ctx)
+                out.append(merged)
+            return out
+
+        if half > 0:
+            seqs_cont = _merge_frame_context(seqs_cont, base_cont_dim)
+
+        pred_reasons, prob_incorrect_list, pred_reason_probs = [], [], []
+        batch_size = args.batch_size
+        n = len(seqs_cont)
+        use_hf = ckpt.get("use_head_forward_embedding", False)
+        with torch.inference_mode():
+            for start in range(0, n, batch_size):
+                batch_cont = seqs_cont[start : start + batch_size]
+                batch_hf = seqs_hf[start : start + batch_size]
+                lengths = torch.tensor([len(s) for s in batch_cont], dtype=torch.long)
+                padded_cont = torch.nn.utils.rnn.pad_sequence(
+                    [torch.tensor(s, dtype=torch.float32) for s in batch_cont],
+                    batch_first=True,
+                    padding_value=0.0,
+                )
+                padded_hf = torch.nn.utils.rnn.pad_sequence(
+                    [torch.tensor(s, dtype=torch.long) for s in batch_hf],
+                    batch_first=True,
+                    padding_value=0,
+                )
+                x = padded_cont.to(device)
+                x_hf = padded_hf.to(device) if use_hf else None
+                lengths = lengths.to(device)
+                logits_c, logits_r = model(x, lengths, x_head_forward=x_hf)
+                prob_c = torch.softmax(logits_c, dim=1).cpu().numpy()
+                pred_r = logits_r.argmax(1).cpu().numpy()
+                prob_r = torch.softmax(logits_r, dim=1).cpu().numpy()
+                for i in range(len(batch_cont)):
+                    pred_reasons.append(int(pred_r[i]))
+                    prob_incorrect_list.append(float(prob_c[i, 1]))
+                    pred_reason_probs.append(prob_r[i])
+
+        prob_incorrect = np.array(prob_incorrect_list)
+        pred_probs = np.array(pred_reason_probs)
+        gt_labels = np.array(gt_labels)
+        gt_reasons_arr = np.array(gt_reasons)
+        pred_reasons_arr = np.array(pred_reasons)
 
     # 计算指标：P, R, mAP（7 类 AP 均值）
     try:
@@ -211,11 +246,6 @@ def main():
         print("请安装 sklearn: pip install scikit-learn")
         sys.exit(1)
 
-    gt_labels = np.array(gt_labels)
-    prob_incorrect = np.array(prob_incorrect_list)
-    pred_probs = np.array(pred_reason_probs)
-    gt_reasons_arr = np.array(gt_reasons)
-    pred_reasons_arr = np.array(pred_reasons)
     n_reasons = len(REASON_NAMES)
     y_bin = label_binarize(gt_reasons_arr, classes=range(n_reasons))
 
