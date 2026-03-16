@@ -235,7 +235,7 @@ def build_track_val_loader(
 
 
 def run_val_inference(model, val_loader, device):
-    """与训练时验证循环一致：带 mask (y_ep>0.5)，返回 (prob_incorrect, reason_probs, labels, reasons) 四个数组。"""
+    """与训练时验证循环一致：对 val 中全部样本（正负都评，不按 is_endpoint 过滤）返回 (prob_incorrect, reason_probs, labels, reasons)。"""
     import torch
     import numpy as np
     prob_incorrect_list, reason_probs_list, labels_list, reasons_list = [], [], [], []
@@ -244,16 +244,14 @@ def run_val_inference(model, val_loader, device):
         for x, x_hf, lengths, y_label, y_reason, y_ep in val_loader:
             x, x_hf = x.to(device), x_hf.to(device)
             lengths = lengths.to(device)
-            y_label, y_reason, y_ep = y_label.to(device), y_reason.to(device), y_ep.to(device)
+            y_label, y_reason = y_label.to(device), y_reason.to(device)
             logits_c, logits_r = model(x, lengths, x_head_forward=x_hf)
-            mask = (y_ep > 0.5).squeeze(1)
-            if mask.any():
-                prob_r = torch.softmax(logits_r[mask], dim=1).cpu().numpy()
-                prob_incorrect = torch.softmax(logits_c[mask], dim=1).cpu().numpy()[:, 1]
-                prob_incorrect_list.append(prob_incorrect)
-                reason_probs_list.append(prob_r)
-                labels_list.append(y_label[mask].cpu().numpy())
-                reasons_list.append(y_reason[mask].cpu().numpy())
+            prob_r = torch.softmax(logits_r, dim=1).cpu().numpy()
+            prob_incorrect = torch.softmax(logits_c, dim=1).cpu().numpy()[:, 1]
+            prob_incorrect_list.append(prob_incorrect)
+            reason_probs_list.append(prob_r)
+            labels_list.append(y_label.cpu().numpy())
+            reasons_list.append(y_reason.cpu().numpy())
     prob_incorrect = np.concatenate(prob_incorrect_list, axis=0) if prob_incorrect_list else np.array([])
     reason_probs = np.concatenate(reason_probs_list, axis=0) if reason_probs_list else np.array([])
     labels = np.concatenate(labels_list, axis=0) if labels_list else np.array([])
@@ -644,7 +642,7 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("最优模型选取: mAP  |  早停 patience={}".format(args.patience))
+    print("最优模型选取: (P+R+AP)均值（7 类）  |  早停 patience={}".format(args.patience))
 
     best_val_f1 = 0.0
     best_epoch = 0
@@ -686,30 +684,29 @@ def main():
         val_reason_preds, val_reason_labels = [], []
         val_reason_probs_list = []
         val_prob_incorrect_list = []
+        # 正负样本都评估，不按 is_endpoint 过滤
         with torch.no_grad():
             for x, x_hf, lengths, y_label, y_reason, y_ep in val_loader:
                 x, x_hf = x.to(device), x_hf.to(device)
                 lengths = lengths.to(device)
-                y_label, y_reason, y_ep = y_label.to(device), y_reason.to(device), y_ep.to(device)
+                y_label, y_reason = y_label.to(device), y_reason.to(device)
                 logits_c, logits_r = model(x, lengths, x_head_forward=x_hf)
-                mask = (y_ep > 0.5).squeeze(1)
-                if mask.any():
-                    pred = logits_c[mask].argmax(1).cpu().numpy()
-                    gt = y_label[mask].cpu().numpy()
-                    val_preds.extend(pred.tolist())
-                    val_labels.extend(gt.tolist())
-                    r_pred = logits_r[mask].argmax(1).cpu().numpy()
-                    r_gt = y_reason[mask].cpu().numpy()
-                    val_reason_preds.extend(r_pred.tolist())
-                    val_reason_labels.extend(r_gt.tolist())
-                    prob_r = torch.softmax(logits_r[mask], dim=1).cpu().numpy()
-                    val_reason_probs_list.append(prob_r)
-                    prob_incorrect = torch.softmax(logits_c[mask], dim=1).cpu().numpy()[:, 1]
-                    val_prob_incorrect_list.append(prob_incorrect)
+                pred = logits_c.argmax(1).cpu().numpy()
+                gt = y_label.cpu().numpy()
+                val_preds.extend(pred.tolist())
+                val_labels.extend(gt.tolist())
+                r_pred = logits_r.argmax(1).cpu().numpy()
+                r_gt = y_reason.cpu().numpy()
+                val_reason_preds.extend(r_pred.tolist())
+                val_reason_labels.extend(r_gt.tolist())
+                prob_r = torch.softmax(logits_r, dim=1).cpu().numpy()
+                val_reason_probs_list.append(prob_r)
+                prob_incorrect = torch.softmax(logits_c, dim=1).cpu().numpy()[:, 1]
+                val_prob_incorrect_list.append(prob_incorrect)
 
         binary_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
         reason_f1 = f1_score(val_reason_labels, val_reason_preds, average="macro", zero_division=0) if val_reason_preds else 0.0
-        # 与 eval_behavior 完全一致：阈值仅在 [THRESH_MIN, THRESH_MAX] 内搜索，F1≥MIN_BINARY_F1 约束下最大化 mAP
+        # 与 eval_behavior 一致：阈值 [THRESH_MIN, THRESH_MAX]，F1≥MIN_BINARY_F1 约束下最大化「7 类 (P+R+AP) 均值」
         from sklearn.metrics import average_precision_score, precision_recall_fscore_support
         from sklearn.preprocessing import label_binarize
         from models.behavior_correctness import NUM_REASONS
@@ -726,21 +723,27 @@ def main():
             def _pred_at_thresh(prob: np.ndarray, t: float) -> np.ndarray:
                 return (prob >= t).astype(np.int64)
 
-            def _mAP_at_thresh(t: float) -> float:
+            def _score_at_thresh(t: float) -> float:
+                """7 类 (P+R+AP) 的均值，用于选优与阈值搜索。"""
                 pred_b = _pred_at_thresh(val_prob_incorrect, t)
+                effective_reason = np.where(pred_b == 0, 2, np.argmax(val_reason_probs, axis=1))
                 effective_probs = np.zeros_like(val_reason_probs)
                 for i in range(len(pred_b)):
                     if pred_b[i] == 0:
                         effective_probs[i, 2] = 1.0
                     else:
                         effective_probs[i, :] = val_reason_probs[i, :]
+                p_per, r_per, _, _ = precision_recall_fscore_support(
+                    val_reason_labels_arr, effective_reason, labels=range(NUM_REASONS),
+                    average=None, zero_division=0
+                )
                 ap_per = []
                 for c in range(NUM_REASONS):
                     if y_bin[:, c].sum() == 0:
                         ap_per.append(0.0)
                     else:
                         ap_per.append(average_precision_score(y_bin[:, c], effective_probs[:, c]))
-                return float(np.mean(ap_per)) if ap_per else 0.0
+                return float(np.mean([p_per[c] + r_per[c] + ap_per[c] for c in range(NUM_REASONS)]))
 
             best_score = 0.0
             best_f1_fallback = 0.0
@@ -751,16 +754,16 @@ def main():
                     gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0
                 )
                 binary_f1_t = float(f1_t[1]) if gt_labels.sum() > 0 else 0.0
-                mAP_t = _mAP_at_thresh(t)
-                if binary_f1_t >= MIN_BINARY_F1 and mAP_t > best_score:
-                    best_score = mAP_t
+                score_t = _score_at_thresh(t)
+                if binary_f1_t >= MIN_BINARY_F1 and score_t > best_score:
+                    best_score = score_t
                     best_thresh = t
                 if binary_f1_t > best_f1_fallback:
                     best_f1_fallback = binary_f1_t
                     best_thresh_f1_fallback = t
             if best_score == 0.0:
                 best_thresh = best_thresh_f1_fallback
-                best_score = _mAP_at_thresh(best_thresh)
+                best_score = _score_at_thresh(best_thresh)
             select_score = best_score
         else:
             select_score = 0.0
@@ -793,13 +796,13 @@ def main():
             "use_attention": not args.no_attention,
             "use_head_forward_embedding": True,
         }, out_dir / "last.pt")
-        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} mAP={select_score:.4f} thresh={best_thresh:.2f}")
+        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} score={select_score:.4f} thresh={best_thresh:.2f}")
 
         if args.patience > 0 and epochs_without_improve >= args.patience:
             print(f"早停: {args.patience} epoch 无提升，停止于 epoch {ep + 1}")
             break
 
-    print(f"训练完成，最佳 mAP={best_val_f1:.4f} 最优阈值={best_val_thresh:.2f} (epoch {best_epoch})")
+    print(f"训练完成，最佳 (P+R+AP)均值={best_val_f1:.4f} 最优阈值={best_val_thresh:.2f} (epoch {best_epoch})")
     print(f"模型保存: {out_dir / 'best.pt'}, {out_dir / 'last.pt'}")
 
 

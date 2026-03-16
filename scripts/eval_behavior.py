@@ -19,11 +19,11 @@ sys.path.insert(0, str(ROOT))
 
 def load_samples_from_track(
     path: Path, add_velocity: bool = True, split_filter: str | None = None,
-    endpoint_only: bool = True,
+    endpoint_only: bool = False,
 ):
     """从 track_sequences.json 加载样本，返回 (seqs_cont, seqs_hf, labels, reasons, is_endpoints)。
     split_filter: 仅加载该 split（'train'/'val'），None 表示全部。
-    endpoint_only: 若 True，只加载 is_endpoint=1 的样本，与训练时 val mask (y_ep>0.5) 一致，保证评估与训练指标准确一致。
+    endpoint_only: 若 True 只加载 is_endpoint=1；默认 False 表示正负样本都加载，与训练/评估一致。
     """
     from models.behavior_correctness import REASON_TO_IDX
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -156,15 +156,15 @@ def main():
                 gt_labels = gt_labels[: args.max_samples]
                 gt_reasons_arr = gt_reasons_arr[: args.max_samples]
                 pred_reasons_arr = pred_reasons_arr[: args.max_samples]
-            print(f"使用与训练一致的 val 流程 (DataLoader+mask)，共 {len(gt_labels)} 条样本")
+            print(f"使用与训练一致的 val 流程 (DataLoader)，共 {len(gt_labels)} 条样本（正负都评）")
             use_train_val_path = True
         else:
             use_train_val_path = False
 
     if not use_train_val_path:
-        print(f"从 track_sequences 加载 (input_dim={input_dim}, split={args.split})...")
+        print(f"从 track_sequences 加载 (input_dim={input_dim}, split={args.split}, 正负都评)...")
         seqs_cont, seqs_hf, gt_labels, gt_reasons, _ = load_samples_from_track(
-            data_path, add_velocity=not args.no_velocity, split_filter=split_filter, endpoint_only=True
+            data_path, add_velocity=not args.no_velocity, split_filter=split_filter, endpoint_only=False
         )
         if input_dim == 8:
             print("WARN: track_sequences 通常为 12 维，请确认模型 input_dim")
@@ -249,31 +249,36 @@ def main():
     n_reasons = len(REASON_NAMES)
     y_bin = label_binarize(gt_reasons_arr, classes=range(n_reasons))
 
-    # 阈值：自动搜索使 mAP 最大的阈值，或使用指定值
+    # 阈值：自动搜索使「7 类 (P+R+AP) 均值」最大的阈值，或使用指定值
     def _pred_at_thresh(prob: np.ndarray, reasons: np.ndarray, t: float) -> np.ndarray:
         pred = (prob >= t).astype(np.int64)
         if args.reason_override:
             pred[(reasons == 3) | (reasons == 4) | (reasons == 5) | (reasons == 6)] = 1
         return pred
 
-    def _mAP_at_thresh(t: float) -> float:
-        """给定阈值 t，按 pred_b 得到有效 reason；再算 mAP（7 类 AP 均值）"""
+    def _score_at_thresh(t: float) -> float:
+        """7 类 (P+R+AP) 的均值，与 train_behavior 选优指标一致。"""
         pred_b = _pred_at_thresh(prob_incorrect, pred_reasons_arr, t)
+        effective_reason = np.where(pred_b == 0, 2, pred_reasons_arr)
         effective_probs = np.zeros_like(pred_probs)
         for i in range(len(pred_b)):
             if pred_b[i] == 0:
                 effective_probs[i, 2] = 1.0
             else:
                 effective_probs[i, :] = pred_probs[i, :]
+        p_per, r_per, _, _ = precision_recall_fscore_support(
+            gt_reasons_arr, effective_reason, labels=range(n_reasons),
+            average=None, zero_division=0
+        )
         ap_per = []
         for c in range(n_reasons):
             if y_bin[:, c].sum() == 0:
                 ap_per.append(0.0)
             else:
                 ap_per.append(average_precision_score(y_bin[:, c], effective_probs[:, c]))
-        return float(np.mean(ap_per)) if ap_per else 0.0
+        return float(np.mean([p_per[c] + r_per[c] + ap_per[c] for c in range(n_reasons)]))
 
-    # 与 train_behavior 一致：阈值仅在 [THRESH_MIN, THRESH_MAX] 内搜索，且 binary F1 ≥ MIN_BINARY_F1 约束下最大化 mAP
+    # 与 train_behavior 一致：阈值 [THRESH_MIN, THRESH_MAX]，F1≥MIN_BINARY_F1 约束下最大化 (P+R+AP)均值
     MIN_BINARY_F1 = 0.25
     THRESH_MIN, THRESH_MAX = 0.15, 0.85
     best_thresh = args.incorrect_threshold
@@ -289,20 +294,20 @@ def main():
                 gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0
             )
             binary_f1 = float(f1_t[1]) if gt_labels.sum() > 0 else 0.0
-            mAP_t = _mAP_at_thresh(t)
-            if binary_f1 >= MIN_BINARY_F1 and mAP_t > best_score:
-                best_score = mAP_t
+            score_t = _score_at_thresh(t)
+            if binary_f1 >= MIN_BINARY_F1 and score_t > best_score:
+                best_score = score_t
                 best_thresh = t
             if binary_f1 > best_f1_fallback:
                 best_f1_fallback = binary_f1
                 best_thresh_f1_fallback = t
         if best_score == 0.0:
             best_thresh = best_thresh_f1_fallback
-            best_score = _mAP_at_thresh(best_thresh)
+            best_score = _score_at_thresh(best_thresh)
             used_f1_fallback = True
     else:
         best_thresh = args.incorrect_threshold
-        best_score = _mAP_at_thresh(best_thresh)
+        best_score = _score_at_thresh(best_thresh)
 
     pred_labels = _pred_at_thresh(prob_incorrect, pred_reasons_arr, best_thresh)
     p, r, f1, _ = precision_recall_fscore_support(
@@ -314,7 +319,7 @@ def main():
     if do_search and args.incorrect_threshold != best_thresh:
         parts.append("(阈值由搜索选取，未使用 --incorrect-threshold)")
     suffix = "  " + " ".join(parts) if parts else ""
-    print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  mAP={best_score:.4f}  P={p[1]:.4f}  R={r[1]:.4f}  F1={f1[1]:.4f}{suffix}")
+    print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  score(P+R+AP)={best_score:.4f}  P={p[1]:.4f}  R={r[1]:.4f}  F1={f1[1]:.4f}{suffix}")
     # 在最优阈值下的有效 reason：correct 样本视为 in_progress(2)，用于下表
     effective_reason = np.where(pred_labels == 0, 2, pred_reasons_arr)
     effective_probs_final = np.zeros_like(pred_probs)
