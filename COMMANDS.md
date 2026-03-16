@@ -7,7 +7,7 @@
 | `data_generator.py` | `-w 12` | - |
 | `render_and_export.py` | `-w 12` | - |
 | `run_track_and_prepare.py` | `-w 12`（from-labels 时） | - |
-| `train_behavior.py` | `--patience 50` 早停 | best 按 **(mAP50+mAP50-95)/2** 选取；`--boost-incorrect`；`--no-bidirectional --no-attention` |
+| `train_behavior.py` | `--patience 50` 早停 | best 按 **mAP** 选取；`--boost-incorrect`；`--no-bidirectional --no-attention` |
 | `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认仅评估 **val** 集（`--split val`）；`--split all` 评估全部；`--no-threshold-search` 固定阈值；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
 
@@ -36,7 +36,7 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w
 # 路径 B：YOLO 跟踪（需步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（best 按 (mAP50+mAP50-95)/2 选取；--patience 50 早停）
+# 5. 行为模型训练（best 按 mAP 选取；--patience 50 早停）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 1000 --patience 50
 
@@ -111,7 +111,7 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior
 ```
 
-**推荐：启用类别平衡与增强；best 按 (mAP50+mAP50-95)/2 选取**
+**推荐：启用类别平衡与增强；best 按 mAP 选取**
 
 ```bash
 # 错误检测率低时使用 --boost-incorrect；--patience 50 早停
@@ -158,7 +158,7 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c b
 python scripts/verify_pipeline.py -b batches/batch_00000.json -e 0 -d dataset
 ```
 
-## 11. 全量评估（P、R、mAP50、mAP50-95，YOLO 风格表格）
+## 11. 全量评估（P、R、mAP）
 
 默认**仅评估验证集**（`--split val`），与训练时的 val 一致；旧版无 `split` 的 JSON 请用 `--split all`。
 

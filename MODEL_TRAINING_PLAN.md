@@ -155,7 +155,7 @@
 
 当 incorrect 类召回率较低时，可使用：
 
-- **训练**：`--boost-incorrect`（启用 Focal Loss、类别权重、过采样、incorrect 2× 权重）；best 按 **(mAP50+mAP50-95)/2** 选取；`--patience 50` 早停
+- **训练**：`--boost-incorrect`（启用 Focal Loss、类别权重、过采样、incorrect 2× 权重）；best 按 **mAP** 选取；`--patience 50` 早停
 - **推理/评估**：`--incorrect-threshold 0.3`（降低判定阈值）、`--reason-override`（reason 为错误类时强制 incorrect）
 
 ---

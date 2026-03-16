@@ -547,7 +547,7 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("最优模型选取: 固定 (mAP50 + mAP50-95) / 2  |  早停 patience={}".format(args.patience))
+    print("最优模型选取: 固定 mAP（7 类 AP 均值）  |  早停 patience={}".format(args.patience))
 
     best_val_f1 = 0.0
     best_epoch = 0
@@ -608,7 +608,7 @@ def main():
 
         binary_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
         reason_f1 = f1_score(val_reason_labels, val_reason_preds, average="macro", zero_division=0) if val_reason_preds else 0.0
-        # 固定策略: (mAP50 + mAP50-95) / 2（与 eval_behavior 一致，分类任务下两者均为 7 类 AP 的均值）
+        # 固定策略: mAP（7 类 AP 的均值）
         from sklearn.metrics import average_precision_score
         from sklearn.preprocessing import label_binarize
         from models.behavior_correctness import NUM_REASONS
@@ -623,11 +623,8 @@ def main():
                 else:
                     ap = average_precision_score(y_bin[:, c], val_reason_probs[:, c])
                     ap_per_class.append(ap)
-            mAP50 = float(np.mean(ap_per_class)) if ap_per_class else 0.0
-            mAP50_95 = mAP50
-            select_score = (mAP50 + mAP50_95) / 2.0
+            select_score = float(np.mean(ap_per_class)) if ap_per_class else 0.0
         else:
-            mAP50 = mAP50_95 = 0.0
             select_score = 0.0
 
         scheduler.step(select_score)
@@ -657,14 +654,13 @@ def main():
             "use_attention": not args.no_attention,
             "use_head_forward_embedding": True,
         }, out_dir / "last.pt")
-        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} "
-              f"(mAP50+mAP50-95)/2={select_score:.4f}")
+        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} mAP={select_score:.4f}")
 
         if args.patience > 0 and epochs_without_improve >= args.patience:
             print(f"早停: {args.patience} epoch 无提升，停止于 epoch {ep + 1}")
             break
 
-    print(f"训练完成，最佳 (mAP50+mAP50-95)/2={best_val_f1:.4f} (epoch {best_epoch})")
+    print(f"训练完成，最佳 mAP={best_val_f1:.4f} (epoch {best_epoch})")
     print(f"模型保存: {out_dir / 'best.pt'}, {out_dir / 'last.pt'}")
 
 

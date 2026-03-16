@@ -80,7 +80,7 @@ def main():
     p.add_argument("--incorrect-threshold", type=float, default=0.5,
                    help="预测 incorrect 的阈值（仅在 --no-threshold-search 时生效）")
     p.add_argument("--no-threshold-search", action="store_true",
-                   help="不自动搜索阈值时使用 --incorrect-threshold；否则按 (mAP50+mAP50-95)/2 最大选取阈值")
+                   help="不自动搜索阈值时使用 --incorrect-threshold；否则按 mAP 最大选取阈值")
     p.add_argument("--reason-override", action="store_true",
                    help="若预测 reason 为错误类(self_collision/snake_collision/x2_wasted/timeout)，强制 label=incorrect")
     p.add_argument("--batch-size", type=int, default=128,
@@ -203,7 +203,7 @@ def main():
                 prob_incorrect_list.append(float(prob_c[i, 1]))
                 pred_reason_probs.append(prob_r[i])
 
-    # 计算指标：P, R, mAP50, mAP50-95（格式与 YOLO val 一致）
+    # 计算指标：P, R, mAP（7 类 AP 均值）
     try:
         from sklearn.metrics import precision_recall_fscore_support, average_precision_score
         from sklearn.preprocessing import label_binarize
@@ -219,7 +219,7 @@ def main():
     n_reasons = len(REASON_NAMES)
     y_bin = label_binarize(gt_reasons_arr, classes=range(n_reasons))
 
-    # 阈值：自动搜索使 (mAP50 + mAP50-95)/2 最大的阈值，或使用指定值
+    # 阈值：自动搜索使 mAP 最大的阈值，或使用指定值
     def _pred_at_thresh(prob: np.ndarray, reasons: np.ndarray, t: float) -> np.ndarray:
         pred = (prob >= t).astype(np.int64)
         if args.reason_override:
@@ -227,9 +227,8 @@ def main():
         return pred
 
     def _mAP_at_thresh(t: float) -> float:
-        """给定阈值 t，按 pred_b 得到有效 reason：correct 的样本视为 in_progress(2)，incorrect 用模型 reason；再算 (mAP50+mAP50-95)/2"""
+        """给定阈值 t，按 pred_b 得到有效 reason；再算 mAP（7 类 AP 均值）"""
         pred_b = _pred_at_thresh(prob_incorrect, pred_reasons_arr, t)
-        # 有效概率：pred_b=0 的样本视为 in_progress(2)，其余用 pred_probs
         effective_probs = np.zeros_like(pred_probs)
         for i in range(len(pred_b)):
             if pred_b[i] == 0:
@@ -242,15 +241,13 @@ def main():
                 ap_per.append(0.0)
             else:
                 ap_per.append(average_precision_score(y_bin[:, c], effective_probs[:, c]))
-        mAP50 = float(np.mean(ap_per)) if ap_per else 0.0
-        mAP50_95 = mAP50
-        return (mAP50 + mAP50_95) / 2.0
+        return float(np.mean(ap_per)) if ap_per else 0.0
 
     best_thresh = args.incorrect_threshold
     best_score = 0.0
     do_search = not args.no_threshold_search
     if do_search:
-        for t in np.arange(0.05, 0.96, 0.05):
+        for t in np.arange(0.01, 1.0, 0.01):
             score = _mAP_at_thresh(t)
             if score > best_score:
                 best_score = score
@@ -263,7 +260,7 @@ def main():
     p, r, f1, _ = precision_recall_fscore_support(
         gt_labels, pred_labels, labels=[0, 1], average=None, zero_division=0
     )
-    print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  (mAP50+mAP50-95)/2={best_score:.4f}  P={p[1]:.4f}  R={r[1]:.4f}  F1={f1[1]:.4f}")
+    print(f"\nBinary (correct/incorrect) 最优阈值={best_thresh:.2f}  mAP={best_score:.4f}  P={p[1]:.4f}  R={r[1]:.4f}  F1={f1[1]:.4f}")
     # 在最优阈值下的有效 reason：correct 样本视为 in_progress(2)，用于下表
     effective_reason = np.where(pred_labels == 0, 2, pred_reasons_arr)
     effective_probs_final = np.zeros_like(pred_probs)
@@ -272,7 +269,7 @@ def main():
             effective_probs_final[i, 2] = 1.0
         else:
             effective_probs_final[i, :] = pred_probs[i, :]
-    # 每类 P, R, mAP50, mAP50-95（与选取阈值的指标一致）
+    # 每类 P, R, mAP（与选取阈值的指标一致）
     p_per, r_per, _, support = precision_recall_fscore_support(
         gt_reasons_arr, effective_reason, labels=range(n_reasons),
         average=None, zero_division=0
@@ -288,18 +285,17 @@ def main():
     # 整体 = 7 类 reason 的宏平均（与 YOLO all 一致）
     p_all = float(np.mean(p_per))
     r_all = float(np.mean(r_per))
-    ap50_all = float(np.mean(ap_per_class)) if ap_per_class else 0.0
-    map50_95_all = ap50_all
+    mAP_all = float(np.mean(ap_per_class)) if ap_per_class else 0.0
     total_support = int(np.sum(support))
 
-    # 打印：表头在第一行，n 在 Class 与 P 之间；all 行为总数
-    print("\n" + f"{'Class':<22}  {'n':>8}  {'P':>10}  {'R':>10}  {'mAP50':>10}  {'mAP50-95':>10}")
-    print("-" * 78)
-    print(f"{'all':<22}  {total_support:>8}  {p_all:>10.4f}  {r_all:>10.4f}  {ap50_all:>10.4f}  {map50_95_all:>10.4f}")
+    # 打印：分类任务仅 mAP（每类 AP 均值）
+    print("\n" + f"{'Class':<22}  {'n':>8}  {'P':>10}  {'R':>10}  {'mAP':>10}")
+    print("-" * 68)
+    print(f"{'all':<22}  {total_support:>8}  {p_all:>10.4f}  {r_all:>10.4f}  {mAP_all:>10.4f}")
     for c in range(n_reasons):
         name = REASON_NAMES[c][:20]
-        ap50 = ap_per_class[c] if c < len(ap_per_class) else 0.0
-        print(f"{name:<22}  {int(support[c]):>8}  {p_per[c]:>10.4f}  {r_per[c]:>10.4f}  {ap50:>10.4f}  {ap50:>10.4f}")
+        ap_c = ap_per_class[c] if c < len(ap_per_class) else 0.0
+        print(f"{name:<22}  {int(support[c]):>8}  {p_per[c]:>10.4f}  {r_per[c]:>10.4f}  {ap_c:>10.4f}")
 
 
 if __name__ == "__main__":
