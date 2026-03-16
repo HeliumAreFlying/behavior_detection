@@ -17,7 +17,7 @@ flowchart TB
     B -->|视觉路径| D
     C --> D
 
-    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧17维+蛇头前方格(4类), 输入label或YOLO track"]
+    D["4. 序列构建 run_track_and_prepare<br/>每蛇每帧18维+蛇头前方格(4类), 输入label或YOLO track"]
     D --> E
 
     E["5. 行为正确性 train_behavior 双向LSTM+注意力<br/>correct/incorrect + reason 共7类"]
@@ -37,17 +37,18 @@ flowchart TB
 | 5. 行为训练 | `train_behavior.py` | sequences（按 `split` 划分 train/val）或 grid | `checkpoints/behavior/best.pt` |
 | 6. 视频演示 | `demo_video.py` | batch + 模型权重 | 带标注的 MP4 视频 |
 
-### 17 维连续特征 + 蛇头前方一格（4 类）+ 3 帧上下文（行为模型输入）
+### 18 维连续特征 + 蛇头前方一格（4 类）+ 3 帧上下文（行为模型输入）
 
 **特征约束**：仅使用 YOLO 能从图像检测到的信息（head/food/x2 位置），grid 与 track 两种路径完全一致。
 
-每帧每蛇**连续特征**（17 维）：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2]`
+每帧每蛇**连续特征**（18 维）：`[head_x, head_y, vel_x, vel_y, food_x, food_y, x2_x, x2_y, has_x2, dist_to_food, dist_to_x2, moving_towards_food, ate_food, ate_x2, is_dead, steps_since_food, ate_food_while_x2, about_to_timeout]`
 
 - `ate_food` / `ate_x2`：由连续帧 head/food/x2 位置推导，YOLO 推理时同样可计算
 - `is_dead`：蛇是否已撞击死亡（YOLO 5 类时 class 4=`snake_head_dead` 表示圆形蛇头，label 路径从解析结果读取）
 - `steps_since_food`：自上次吃食物以来的帧数，归一化 `min(count/80, 1.0)`
+- `about_to_timeout`：若**下一步再没吃到果子就超时**（80 步）则为 1，否则为 0
 - **蛇头前方一格**（离散，Embedding 输入）：0=空，1=自己身体，2=其他蛇身体，3=其他蛇头；用于区分 self_collision / snake_collision 及碰撞部位
-- 训练时默认将**前后共 3 帧**（1 前 + 当前 + 1 后）合并为 1 帧输入（3×17=51 维 + head_forward 嵌入）
+- 训练时默认将**前后共 3 帧**（1 前 + 当前 + 1 后）合并为 1 帧输入（3×18=54 维 + head_forward 嵌入）
 
 ---
 
