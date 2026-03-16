@@ -551,6 +551,7 @@ def main():
 
     best_val_f1 = 0.0
     best_epoch = 0
+    best_val_thresh = 0.5
     epochs_without_improve = 0
     for ep in range(args.epochs):
         model.train()
@@ -611,30 +612,58 @@ def main():
 
         binary_f1 = f1_score(val_labels, val_preds, average="macro", zero_division=0) if val_preds else 0.0
         reason_f1 = f1_score(val_reason_labels, val_reason_preds, average="macro", zero_division=0) if val_reason_preds else 0.0
-        # 与 eval_behavior 一致：在固定阈值 0.5 下构造 effective reason 再算 mAP，便于与评估脚本对比
-        from sklearn.metrics import average_precision_score
+        # 与 eval_behavior 一致：搜索最优阈值（F1≥0.25 约束下最大化 mAP），用该阈值下的 mAP 选 best
+        from sklearn.metrics import average_precision_score, precision_recall_fscore_support
         from sklearn.preprocessing import label_binarize
         from models.behavior_correctness import NUM_REASONS
+        MIN_BINARY_F1 = 0.25
+        best_thresh = 0.5
         if val_reason_probs_list:
             val_reason_probs = np.concatenate(val_reason_probs_list, axis=0)
             val_prob_incorrect = np.concatenate(val_prob_incorrect_list, axis=0)
             val_reason_labels_arr = np.array(val_reason_labels)
+            gt_labels = np.array(val_labels)
             y_bin = label_binarize(val_reason_labels_arr, classes=range(NUM_REASONS))
-            pred_b = (val_prob_incorrect >= 0.5).astype(np.int64)
-            effective_probs = np.zeros_like(val_reason_probs)
-            for i in range(len(pred_b)):
-                if pred_b[i] == 0:
-                    effective_probs[i, 2] = 1.0
-                else:
-                    effective_probs[i, :] = val_reason_probs[i, :]
-            ap_per_class = []
-            for c in range(NUM_REASONS):
-                if y_bin[:, c].sum() == 0:
-                    ap_per_class.append(0.0)
-                else:
-                    ap = average_precision_score(y_bin[:, c], effective_probs[:, c])
-                    ap_per_class.append(ap)
-            select_score = float(np.mean(ap_per_class)) if ap_per_class else 0.0
+
+            def _pred_at_thresh(prob: np.ndarray, t: float) -> np.ndarray:
+                return (prob >= t).astype(np.int64)
+
+            def _mAP_at_thresh(t: float) -> float:
+                pred_b = _pred_at_thresh(val_prob_incorrect, t)
+                effective_probs = np.zeros_like(val_reason_probs)
+                for i in range(len(pred_b)):
+                    if pred_b[i] == 0:
+                        effective_probs[i, 2] = 1.0
+                    else:
+                        effective_probs[i, :] = val_reason_probs[i, :]
+                ap_per = []
+                for c in range(NUM_REASONS):
+                    if y_bin[:, c].sum() == 0:
+                        ap_per.append(0.0)
+                    else:
+                        ap_per.append(average_precision_score(y_bin[:, c], effective_probs[:, c]))
+                return float(np.mean(ap_per)) if ap_per else 0.0
+
+            best_score = 0.0
+            best_f1_fallback = 0.0
+            best_thresh_f1_fallback = 0.5
+            for t in np.arange(0.01, 1.0, 0.01):
+                pred_b = _pred_at_thresh(val_prob_incorrect, t)
+                p_t, r_t, f1_t, _ = precision_recall_fscore_support(
+                    gt_labels, pred_b, labels=[0, 1], average=None, zero_division=0
+                )
+                binary_f1_t = float(f1_t[1]) if gt_labels.sum() > 0 else 0.0
+                mAP_t = _mAP_at_thresh(t)
+                if binary_f1_t >= MIN_BINARY_F1 and mAP_t > best_score:
+                    best_score = mAP_t
+                    best_thresh = t
+                if binary_f1_t > best_f1_fallback:
+                    best_f1_fallback = binary_f1_t
+                    best_thresh_f1_fallback = t
+            if best_score == 0.0:
+                best_thresh = best_thresh_f1_fallback
+                best_score = _mAP_at_thresh(best_thresh)
+            select_score = best_score
         else:
             select_score = 0.0
 
@@ -642,6 +671,7 @@ def main():
         if select_score > best_val_f1:
             best_val_f1 = select_score
             best_epoch = ep + 1
+            best_val_thresh = best_thresh
             epochs_without_improve = 0
             torch.save({
                 "epoch": ep,
@@ -665,13 +695,13 @@ def main():
             "use_attention": not args.no_attention,
             "use_head_forward_embedding": True,
         }, out_dir / "last.pt")
-        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} mAP={select_score:.4f}")
+        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} mAP={select_score:.4f} thresh={best_thresh:.2f}")
 
         if args.patience > 0 and epochs_without_improve >= args.patience:
             print(f"早停: {args.patience} epoch 无提升，停止于 epoch {ep + 1}")
             break
 
-    print(f"训练完成，最佳 mAP={best_val_f1:.4f} (epoch {best_epoch})")
+    print(f"训练完成，最佳 mAP={best_val_f1:.4f} 最优阈值={best_val_thresh:.2f} (epoch {best_epoch})")
     print(f"模型保存: {out_dir / 'best.pt'}, {out_dir / 'last.pt'}")
 
 
