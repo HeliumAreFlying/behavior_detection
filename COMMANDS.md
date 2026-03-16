@@ -8,7 +8,7 @@
 | `render_and_export.py` | `-w 8` | - |
 | `run_track_and_prepare.py` | `-w 8`（from-labels 时） | - |
 | `train_behavior.py` | `--patience 50` 早停 | `--best-metric reason_f1` 稳健选 best；`--boost-incorrect`；`--no-bidirectional --no-attention` |
-| `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认自动搜索最优 F1 阈值；`--no-threshold-search` 使用固定阈值；`--reason-override` |
+| `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认仅评估 **val** 集（`--split val`）；`--split all` 评估全部；`--no-threshold-search` 固定阈值；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
 
 > Ctrl+C 可安全中断多进程脚本，不会卡死。
@@ -40,7 +40,7 @@ python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d 
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 1000 --patience 50
 
-# 6. 评估（自动搜索最优 F1 阈值；--batch-size 256 提速）
+# 6. 评估（默认仅 val 集，与训练一致；--split all 评估全部；--batch-size 256 提速）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json --batch-size 256
 
 # 7. 演示视频（-d dataset 与训练一致；路径 B 加 -m 权重 --draw-boxes）
@@ -80,6 +80,8 @@ yolo train model=yolov8n.pt data=dataset/data.yaml epochs=100 imgsz=640 batch=12
 ```
 
 ## 5. 序列准备（二选一，支持多进程 `-w`）
+
+生成的 `track_sequences.json` 中每条序列带 `split`（train/val），与 `render_and_export` 的 dataset 划分一致，供训练与评估使用。
 
 ```bash
 # 纯 label（多进程）
@@ -156,18 +158,20 @@ python scripts/verify_pipeline.py -b batches/batch_00000.json -e 0 -d dataset
 
 ## 11. 全量评估（P、R、mAP50、mAP50-95，YOLO 风格表格）
 
+默认**仅评估验证集**（`--split val`），与训练时的 val 一致；旧版无 `split` 的 JSON 请用 `--split all`。
+
 ```bash
-# 从 track_sequences 评估（默认自动搜索最优 F1 阈值）
+# 默认评估 val 集（与训练验证集一致）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
+
+# 评估全部：--split all
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --split all
 
 # 使用固定阈值
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --no-threshold-search --incorrect-threshold 0.9
 
 # --reason-override：reason 为错误类时强制 label=incorrect
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --reason-override
-
-# 从 batches 评估（需 dataset metadata）
-python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
 
 # 大批量推理提速（默认 128，显存允许可增大）
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --batch-size 256

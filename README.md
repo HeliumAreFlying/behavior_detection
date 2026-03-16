@@ -33,8 +33,8 @@ flowchart TB
 | 1. 数据生成 | `data_generator.py` | 随机种子、规则参数 | `batches/batch_*.json` |
 | 2. 渲染导出 | `render_and_export.py` | batch JSON | `dataset/` (640×640 images + labels + metadata) |
 | 3. 目标检测 | YOLO `train` / `track` | 渲染图像 | 检测框 + track_id |
-| 4. 序列构建 | `run_track_and_prepare.py` | dataset 或 batch | `sequences/track_sequences.json` |
-| 5. 行为训练 | `train_behavior.py` | sequences 或 grid batches | `checkpoints/behavior/best.pt` |
+| 4. 序列构建 | `run_track_and_prepare.py` | dataset（含 train/val） | `sequences/track_sequences.json`（每条序列带 `split`，与 dataset 一致） |
+| 5. 行为训练 | `train_behavior.py` | sequences（按 `split` 划分 train/val）或 grid | `checkpoints/behavior/best.pt` |
 | 6. 视频演示 | `demo_video.py` | batch + 模型权重 | 带标注的 MP4 视频 |
 
 ### 16 维基础特征 + 3 帧上下文（行为模型输入）
@@ -187,7 +187,7 @@ python replay_ui.py
 python scripts/render_and_export.py --batches batches/ --output dataset --val-ratio 0.2 -w 8
 ```
 
-输出 `dataset/train`, `dataset/val`（640×640 images + labels + metadata.json）。蛇头视觉：开局菱形、前进三角(尖指方向)、撞击圆形。
+输出 `dataset/train`、`dataset/val`（640×640 images + labels + metadata.json）。`run_track_and_prepare` 会据此为每条序列写入 `split`，训练与评估的 train/val 与 dataset 一致。蛇头视觉：开局菱形、前进三角(尖指方向)、撞击圆形。
 
 ### 4. 序列准备（二选一）
 
@@ -231,20 +231,20 @@ python scripts/demo_video.py -b batches/batch_00000.json -e 0 -m yolov8n.pt -c c
 
 ### 7. 全量评估（P、R、mAP50、mAP50-95）
 
-默认自动搜索最优 F1 的阈值，输出 YOLO 风格表格（表头 P/R/mAP50/mAP50-95，每类 + all）。
+默认**仅评估验证集**（`--split val`），与训练时的 val 一致，指标准确。自动搜索最优 F1 阈值，输出 YOLO 风格表格（表头 P/R/mAP50/mAP50-95，每类 + all）。
 
 ```bash
-# 从 track_sequences（推荐，与训练格式一致）
+# 默认评估 val 集（与训练验证集一致）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json
+
+# 评估全部数据：--split all（旧版无 split 的 JSON 也请用此选项）
+python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --split all
 
 # 使用固定阈值：--no-threshold-search --incorrect-threshold 0.9
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --no-threshold-search --incorrect-threshold 0.9
 
 # 提升错误召回率：--reason-override
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --reason-override
-
-# 从 batches
-python scripts/eval_behavior.py -c best.pt -b batches/ -d dataset
 
 # 大批量评估提速：--batch-size 256（显存允许时）
 python scripts/eval_behavior.py -c best.pt -d sequences/track_sequences.json --batch-size 256

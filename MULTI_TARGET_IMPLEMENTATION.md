@@ -78,7 +78,8 @@
    - 或单独写 `render_and_export.py`：读取 batch JSON → 调用 game/replay 渲染 → 导出图像和标注
 
 3. **数据集划分**
-   - `train/val/test` 按 episode 划分
+   - `render_and_export` 输出 `dataset/train`、`dataset/val`（按帧比例划分）
+   - `run_track_and_prepare` 生成的 `track_sequences.json` 中每条序列带 `split`，与 dataset 一致；训练与评估按此划分，评估默认仅 val 集
    - 每集可有多蛇，每蛇有独立 `snake_annotations`
 
 ### 阶段 2：目标检测
