@@ -155,8 +155,8 @@
 
 当 incorrect 类召回率较低时，可使用：
 
-- **训练**：`--boost-incorrect`（启用 Focal Loss、类别权重、过采样、incorrect 2× 权重）；best 按 **mAP** 选取（每轮在阈值 0.15~0.85 内搜索，F1≥0.25 约束下最大化 mAP，并打印最优阈值）；`--patience 50` 早停
-- **评估**：默认与训练同一 val 流程（DataLoader+mask），mAP 一致；阈值在 0.15~0.85 内自动搜索；固定阈值时用 `--no-threshold-search --incorrect-threshold 0.15`
+- **训练**：`--boost-incorrect`（启用 Focal Loss、类别权重、过采样、incorrect 2× 权重）；best 按 **7类(P+R+AP)均值** 选取（每轮 0.15~0.85 搜最优阈值，F1≥0.25 约束）；正负样本都参与验证；`--patience 50` 早停
+- **评估**：默认复用训练 val 流程（DataLoader），正负都评，指标准确一致；阈值在 0.15~0.85 内按 (P+R+AP) 均值搜索；固定阈值时用 `--no-threshold-search --incorrect-threshold 0.15`
 - **推理**：`--incorrect-threshold 0.3`（降低判定阈值）、`--reason-override`（reason 为错误类时强制 incorrect）
 
 ---

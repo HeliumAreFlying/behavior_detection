@@ -79,7 +79,7 @@
 
 3. **数据集划分**
    - `render_and_export` 输出 `dataset/train`、`dataset/val`，按**局（episode）**划分（约 val_ratio 的局进 val），保证验证集样本量合理
-   - `run_track_and_prepare` 生成的 `track_sequences.json` 中每条序列带 `split`，与 dataset 一致；训练与评估按此划分；评估默认 val 集且使用与训练同一 DataLoader+mask，mAP 一致；阈值在 0.15~0.85 内按 mAP 搜索
+   - `run_track_and_prepare` 生成的 `track_sequences.json` 中每条序列带 `split`，与 dataset 一致；训练与评估按此划分；评估默认 val 集且复用训练 DataLoader，正负都评，指标准确一致；阈值在 0.15~0.85 内按 7类(P+R+AP)均值 搜索
    - 每帧行为 JSON 含 `head_forward_type`：蛇头前方一格 0=空/1=己身/2=他蛇身体/3=他蛇头，作为模型输入
    - 每集可有多蛇，每蛇有独立 `snake_annotations`
 

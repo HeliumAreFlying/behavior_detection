@@ -7,8 +7,8 @@
 | `data_generator.py` | `-w 12` | - |
 | `render_and_export.py` | `-w 12` | - |
 | `run_track_and_prepare.py` | `-w 12`（from-labels 时） | - |
-| `train_behavior.py` | `--patience 50` 早停 | best 按 **mAP** 选取（每轮搜 0.15~0.85 最优阈值，F1≥0.25）；每轮打印 mAP、thresh；`--boost-incorrect`；`--no-bidirectional --no-attention` |
-| `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认 **val** 与训练同一 DataLoader+mask，mAP 一致；阈值 0.15~0.85 内搜索；`--no-threshold-search` 时用 `--incorrect-threshold`；`--reason-override` |
+| `train_behavior.py` | `--patience 50` 早停 | best 按 **7类(P+R+AP)均值** 选取（每轮 0.15~0.85 最优阈值，F1≥0.25）；正负都评；每轮打印 (P+R+AP)、thresh；`--boost-incorrect`；`--no-bidirectional --no-attention` |
+| `eval_behavior.py` | `--batch-size 256` 大批量推理提速 | 默认 **val** 复用训练 DataLoader，正负都评，指标准确一致；阈值 0.15~0.85 内按 (P+R+AP) 搜索；`--no-threshold-search` 时用 `--incorrect-threshold`；`--reason-override` |
 | `infer_behavior.py` | - | `--incorrect-threshold 0.3` |
 
 > Ctrl+C 可安全中断多进程脚本，不会卡死。
@@ -36,11 +36,11 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences -w
 # 路径 B：YOLO 跟踪（需步骤 3）
 python scripts/run_track_and_prepare.py -m runs/detect/train/weights/best.pt -d dataset -o sequences
 
-# 5. 行为模型训练（best 按 mAP+阈值搜索选取；每轮打印 mAP、thresh；--patience 50 早停）
+# 5. 行为模型训练（best 按 7类(P+R+AP)均值+阈值搜索；每轮打印 (P+R+AP)、thresh；--patience 50 早停）
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --epochs 1000 --patience 50
 
-# 6. 评估（默认与训练同一 val 流程，mAP 一致；阈值 0.15~0.85 内搜索；--batch-size 256 提速）
+# 6. 评估（默认复用训练 val 流程，正负都评；阈值 0.15~0.85 内按 (P+R+AP) 搜索；--batch-size 256 提速）
 python scripts/eval_behavior.py -c checkpoints/behavior/best.pt -d sequences/track_sequences.json --batch-size 256
 
 # 7. 演示视频（-d dataset 与训练一致；路径 B 加 -m 权重 --draw-boxes）
@@ -111,10 +111,10 @@ python scripts/run_track_and_prepare.py --from-labels -d dataset -o sequences
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior
 ```
 
-**推荐：启用类别平衡与增强；best 按 mAP 选取（每轮在 0.15~0.85 内搜最优阈值，F1≥0.25）**
+**推荐：启用类别平衡与增强；best 按 7类(P+R+AP)均值 选取（每轮 0.15~0.85 搜最优阈值，F1≥0.25）；正负都评**
 
 ```bash
-# 错误检测率低时使用 --boost-incorrect；每轮打印 mAP、thresh；--patience 50 早停
+# 错误检测率低时使用 --boost-incorrect；每轮打印 (P+R+AP)、thresh；--patience 50 早停
 python scripts/train_behavior.py --data sequences/track_sequences.json -o checkpoints/behavior \
   --boost-incorrect --aug-multiscale --aug-frame-drop 0.1 --aug-noise 0.02 --patience 50
 
@@ -160,7 +160,7 @@ python scripts/verify_pipeline.py -b batches/batch_00000.json -e 0 -d dataset
 
 ## 11. 全量评估（P、R、mAP）
 
-默认**仅评估验证集**（`--split val`），且使用与训练**同一 val 流程**（DataLoader+mask），mAP 与训练一致；阈值在 0.15~0.85 内按 mAP 搜索。旧版无 `split` 的 JSON 请用 `--split all`。
+默认**仅评估验证集**（`--split val`），且**复用训练 val 流程**（DataLoader），正负样本都评，指标准确一致；阈值在 0.15~0.85 内按 7类(P+R+AP)均值 搜索。旧版无 `split` 的 JSON 请用 `--split all`。
 
 ```bash
 # 默认评估 val 集（与训练同一 val 流程，mAP 一致）
