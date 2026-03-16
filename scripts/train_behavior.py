@@ -657,10 +657,9 @@ def main():
             "use_attention": not args.no_attention,
             "use_head_forward_embedding": True,
         }, out_dir / "last.pt")
-        if (ep + 1) % 10 == 0 or ep == 0:
-            print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} "
-                  f"train_acc={train_correct/train_total:.4f} binary_f1={binary_f1:.4f} reason_f1={reason_f1:.4f} "
-                  f"mAP50={mAP50:.4f} mAP50-95={mAP50_95:.4f} [best=(mAP50+mAP50-95)/2]")
+        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} "
+              f"train_acc={train_correct/train_total:.4f} binary_f1={binary_f1:.4f} reason_f1={reason_f1:.4f} "
+              f"mAP50={mAP50:.4f} mAP50-95={mAP50_95:.4f} [best=(mAP50+mAP50-95)/2]")
 
         if args.patience > 0 and epochs_without_improve >= args.patience:
             print(f"早停: {args.patience} epoch 无提升，停止于 epoch {ep + 1}")
