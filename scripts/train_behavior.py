@@ -642,7 +642,7 @@ def main():
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("最优模型选取: (P+R+AP)均值（7 类）  |  早停 patience={}".format(args.patience))
+    print("最优模型选取: 7类(P+R+AP)均值  |  早停 patience={}".format(args.patience))
 
     best_val_f1 = 0.0
     best_epoch = 0
@@ -796,13 +796,13 @@ def main():
             "use_attention": not args.no_attention,
             "use_head_forward_embedding": True,
         }, out_dir / "last.pt")
-        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} score={select_score:.4f} thresh={best_thresh:.2f}")
+        print(f"Epoch {ep+1}/{args.epochs} loss={train_loss/len(train_loader):.4f} (P+R+AP)={select_score:.4f} thresh={best_thresh:.2f}")
 
         if args.patience > 0 and epochs_without_improve >= args.patience:
             print(f"早停: {args.patience} epoch 无提升，停止于 epoch {ep + 1}")
             break
 
-    print(f"训练完成，最佳 (P+R+AP)均值={best_val_f1:.4f} 最优阈值={best_val_thresh:.2f} (epoch {best_epoch})")
+    print(f"训练完成，最佳 7类(P+R+AP)均值={best_val_f1:.4f} 最优阈值={best_val_thresh:.2f} (epoch {best_epoch})")
     print(f"模型保存: {out_dir / 'best.pt'}, {out_dir / 'last.pt'}")
 
 
