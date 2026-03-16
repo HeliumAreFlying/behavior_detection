@@ -25,7 +25,7 @@ IMG_W = IMG_H = 640
 
 
 def _head_forward_type_from_scene(scene: dict) -> list[int]:
-    """蛇头前方格子: 0=空, 1=自己身体, 2=其他蛇"""
+    """蛇头前方一格: 0=空, 1=自己身体, 2=其他蛇身体, 3=其他蛇头"""
     snakes_data = scene.get("snakes", [])
     if not snakes_data:
         return []
@@ -47,21 +47,27 @@ def _head_forward_type_from_scene(scene: dict) -> list[int]:
         fx = ((hx + dx) % GRID_W + GRID_W) % GRID_W
         fy = ((hy + dy) % GRID_H + GRID_H) % GRID_H
         own_cells = {((int(p[0]) % GRID_W + GRID_W) % GRID_W, (int(p[1]) % GRID_H + GRID_H) % GRID_H) for p in body}
-        other_cells = set()
+        other_heads = set()
+        other_bodies = set()
         for sj, s2 in enumerate(snakes_data):
             if sj == si:
                 continue
-            for p in s2.get("body", []):
+            for idx, p in enumerate(s2.get("body", [])):
                 try:
                     gx = (int(p[0]) % GRID_W + GRID_W) % GRID_W
                     gy = (int(p[1]) % GRID_H + GRID_H) % GRID_H
-                    other_cells.add((gx, gy))
+                    if idx == 0:
+                        other_heads.add((gx, gy))
+                    else:
+                        other_bodies.add((gx, gy))
                 except (IndexError, TypeError):
                     pass
         fwd = (fx, fy)
         if fwd in own_cells:
             result.append(1)
-        elif fwd in other_cells:
+        elif fwd in other_heads:
+            result.append(3)
+        elif fwd in other_bodies:
             result.append(2)
         else:
             result.append(0)
@@ -150,7 +156,7 @@ def _build_seq_features(
             if scenes and t < len(scenes):
                 hf_list = _head_forward_type_from_scene(scenes[t])
                 head_forward = int(hf_list[si]) if si < len(hf_list) else 0
-                head_forward = max(0, min(2, head_forward))
+                head_forward = max(0, min(3, head_forward))
             if ate_food:
                 steps_counter = 0
             else:

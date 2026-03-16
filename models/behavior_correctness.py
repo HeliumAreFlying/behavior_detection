@@ -21,14 +21,14 @@ REASON_TO_IDX = {r: i for i, r in enumerate(REASON_NAMES)}
 NUM_REASONS = len(REASON_NAMES)
 
 
-# 蛇头前方格子类型: 0=空, 1=自己身体, 2=其他蛇。用 Embedding 处理
-HEAD_FORWARD_VOCAB = 3
+# 蛇头前方格子类型: 0=空, 1=自己身体, 2=其他蛇身体, 3=其他蛇头。用 Embedding 处理
+HEAD_FORWARD_VOCAB = 4
 HEAD_FORWARD_EMBED_DIM = 8
 
 
 class BehaviorCorrectnessModel(nn.Module):
     """
-    输入: x_cont (batch, seq_len, cont_dim) + x_head_forward (batch, seq_len) 0/1/2
+    输入: x_cont (batch, seq_len, cont_dim) + x_head_forward (batch, seq_len) 0/1/2/3
     输出: correct (batch, 2), reason (batch, num_reasons)
 
     改进: 双向 LSTM + 自注意力 + head_forward Embedding
@@ -93,7 +93,7 @@ class BehaviorCorrectnessModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         x: (batch, seq_len, cont_dim) 连续特征
-        x_head_forward: (batch, seq_len) 0/1/2，None 时用 0 填充
+        x_head_forward: (batch, seq_len) 0/1/2/3，None 时用 0 填充
         lengths: (batch,) 有效长度，None 时假设无 padding
         """
         if self.use_head_forward_embedding:

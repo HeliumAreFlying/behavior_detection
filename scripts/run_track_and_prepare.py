@@ -160,7 +160,7 @@ def extract_sequences_from_labels(
 ) -> dict[int, list[dict]]:
     """
     从 label + behavior 文件读取每蛇每帧特征。
-    含 head_forward_type(0/1/2), ate_food_while_x2_exists。
+    含 head_forward_type(0/1/2/3: 空/己身/他蛇身体/他蛇头), ate_food_while_x2_exists。
     """
     snake_seqs: dict[int, list[dict]] = defaultdict(list)
     prev_rows: list[tuple] | None = None
@@ -183,7 +183,7 @@ def extract_sequences_from_labels(
             ate_food, ate_x2 = _infer_ate_events(prev, curr)
             ate_food_while_x2 = 1.0 if (ate_food and has_x2) else 0.0
             head_forward = int(head_forward_list[si]) if si < len(head_forward_list) else 0
-            head_forward = max(0, min(2, head_forward))
+            head_forward = max(0, min(3, head_forward))
             if ate_food:
                 steps_counters[si] = 0
             else:

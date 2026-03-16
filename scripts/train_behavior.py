@@ -35,7 +35,7 @@ def _norm(x: float, size: int) -> float:
 
 
 def _head_forward_type_from_scene(scene: dict) -> list[int]:
-    """蛇头前方格子: 0=空, 1=自己身体, 2=其他蛇"""
+    """蛇头前方一格: 0=空, 1=自己身体, 2=其他蛇身体, 3=其他蛇头"""
     snakes_data = scene.get("snakes", [])
     if not snakes_data:
         return []
@@ -57,21 +57,27 @@ def _head_forward_type_from_scene(scene: dict) -> list[int]:
         fx = ((hx + dx) % GRID_W + GRID_W) % GRID_W
         fy = ((hy + dy) % GRID_H + GRID_H) % GRID_H
         own_cells = {((int(p[0]) % GRID_W + GRID_W) % GRID_W, (int(p[1]) % GRID_H + GRID_H) % GRID_H) for p in body}
-        other_cells = set()
+        other_heads = set()
+        other_bodies = set()
         for sj, s2 in enumerate(snakes_data):
             if sj == si:
                 continue
-            for p in s2.get("body", []):
+            for idx, p in enumerate(s2.get("body", [])):
                 try:
                     gx = (int(p[0]) % GRID_W + GRID_W) % GRID_W
                     gy = (int(p[1]) % GRID_H + GRID_H) % GRID_H
-                    other_cells.add((gx, gy))
+                    if idx == 0:
+                        other_heads.add((gx, gy))
+                    else:
+                        other_bodies.add((gx, gy))
                 except (IndexError, TypeError):
                     pass
         fwd = (fx, fy)
         if fwd in own_cells:
             result.append(1)
-        elif fwd in other_cells:
+        elif fwd in other_heads:
+            result.append(3)
+        elif fwd in other_bodies:
             result.append(2)
         else:
             result.append(0)
@@ -109,7 +115,7 @@ def load_track_sequences(
             ate_food = f.get("ate_food", 0.0)
             ate_x2 = f.get("ate_x2", 0.0)
             ate_food_while_x2 = f.get("ate_food_while_x2_exists", 1.0 if (ate_food and has_x2) else 0.0)
-            head_forward = max(0, min(2, int(f.get("head_forward_type", 0))))
+            head_forward = max(0, min(3, int(f.get("head_forward_type", 0))))
             is_dead = f.get("is_dead", 0.0)
             steps_since_food = f.get("steps_since_food", 0.0)
             if add_velocity and i > 0:
@@ -136,7 +142,7 @@ def load_track_sequences(
                 hx2 = f.get("has_x2",0)
                 ate_food, ate_x2 = f.get("ate_food",0), f.get("ate_x2",0)
                 ate_food_while_x2 = f.get("ate_food_while_x2_exists", 1.0 if (ate_food and hx2) else 0.0)
-                head_forward = max(0, min(2, int(f.get("head_forward_type", 0))))
+                head_forward = max(0, min(3, int(f.get("head_forward_type", 0))))
                 is_dead = f.get("is_dead", 0.0)
                 steps_since_food = f.get("steps_since_food", 0.0)
                 df = min(((fx-xc)**2+(fy-yc)**2)**0.5, 1.5) if (fx or fy) else 0.0
@@ -211,7 +217,7 @@ def load_grid_sequences(
                 for i, (xc, yc, fx, fy, xx, xy, has_x2, sc) in enumerate(raw_frames):
                     hf_list = _head_forward_type_from_scene(sc)
                     head_forward = int(hf_list[si]) if si < len(hf_list) else 0
-                    head_forward = max(0, min(2, head_forward))
+                    head_forward = max(0, min(3, head_forward))
                     p = raw_frames[i - 1][:7] if i > 0 else None
                     ate_food, ate_x2 = 0.0, 0.0
                     if p:

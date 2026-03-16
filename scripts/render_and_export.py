@@ -41,8 +41,8 @@ CLASS_HEAD, CLASS_HEAD_DEAD = 0, 4
 
 def _head_forward_type_from_scene(scene: dict) -> list[int]:
     """
-    蛇头前方格子类型: 0=空, 1=自己身体, 2=其他蛇。
-    用于区分 self_collision / snake_collision。
+    蛇头行进方向正前方一格类型: 0=空, 1=自己身体, 2=其他蛇身体, 3=其他蛇头。
+    用于区分 self_collision / snake_collision 及碰撞部位。
     """
     snakes_data = scene.get("snakes", [])
     if not snakes_data:
@@ -66,21 +66,28 @@ def _head_forward_type_from_scene(scene: dict) -> list[int]:
         fx = ((hx + dx) % GRID_W + GRID_W) % GRID_W
         fy = ((hy + dy) % GRID_H + GRID_H) % GRID_H
         own_cells = {((int(p[0]) % GRID_W + GRID_W) % GRID_W, (int(p[1]) % GRID_H + GRID_H) % GRID_H) for p in body}
-        other_cells = set()
+        other_heads = set()
+        other_bodies = set()
         for sj, s2 in enumerate(snakes_data):
             if sj == si:
                 continue
-            for p in s2.get("body", []):
+            b2 = s2.get("body", [])
+            for idx, p in enumerate(b2):
                 try:
                     gx = (int(p[0]) % GRID_W + GRID_W) % GRID_W
                     gy = (int(p[1]) % GRID_H + GRID_H) % GRID_H
-                    other_cells.add((gx, gy))
+                    if idx == 0:
+                        other_heads.add((gx, gy))
+                    else:
+                        other_bodies.add((gx, gy))
                 except (IndexError, TypeError):
                     pass
         fwd = (fx, fy)
         if fwd in own_cells:
             result.append(1)
-        elif fwd in other_cells:
+        elif fwd in other_heads:
+            result.append(3)
+        elif fwd in other_bodies:
             result.append(2)
         else:
             result.append(0)
@@ -369,19 +376,28 @@ def main():
 
     n = len(all_samples)
     workers = min(args.workers or (mp.cpu_count() or 4), n)  # 不超过任务数
-    val_n = int(n * args.val_ratio)
-    train_n = n - val_n
-    indices = list(range(n))
+
+    # 按 episode 划分 train/val，保证约 val_ratio 的「局」在 val，避免按帧划分导致 val 样本极少
+    episode_keys_ordered: list[tuple[str, int]] = []
+    seen = set()
+    for _, __, ___, ____, ep_idx, _____, batch_name in all_samples:
+        k = (batch_name, ep_idx)
+        if k not in seen:
+            seen.add(k)
+            episode_keys_ordered.append(k)
     random.seed(42)
-    random.shuffle(indices)
-    train_idx = set(indices[:train_n])
-    val_idx = set(indices[train_n:])
+    ep_indices = list(range(len(episode_keys_ordered)))
+    random.shuffle(ep_indices)
+    val_ep_n = int(len(episode_keys_ordered) * args.val_ratio)
+    val_episodes = set(episode_keys_ordered[i] for i in ep_indices[:val_ep_n])
+    val_n = sum(1 for _, __, ___, ____, ep_idx, _____, batch_name in all_samples if (batch_name, ep_idx) in val_episodes)
+    train_n = n - val_n
 
     # 构建任务列表：(scene, prev_scene, scene_idx, total_scenes, img_path, lbl_path, beh_path, metadata)
     work_items: list[tuple] = []
     for global_idx in range(n):
         scene, prev_scene, sc_idx, total_scenes, ep_idx, _, batch_name = all_samples[global_idx]
-        split = "val" if global_idx in val_idx else "train"
+        split = "val" if (batch_name, ep_idx) in val_episodes else "train"
         img_dir = output_dir / split / "images"
         lbl_dir = output_dir / split / "labels"
         beh_dir = output_dir / split / "behavior"

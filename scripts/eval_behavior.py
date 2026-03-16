@@ -41,7 +41,7 @@ def load_samples_from_track(
             has_x2 = f.get("has_x2", 0.0)
             ate_food, ate_x2 = f.get("ate_food", 0.0), f.get("ate_x2", 0.0)
             ate_food_while_x2 = f.get("ate_food_while_x2_exists", 1.0 if (ate_food and has_x2) else 0.0)
-            head_forward = max(0, min(2, int(f.get("head_forward_type", 0))))
+            head_forward = max(0, min(3, int(f.get("head_forward_type", 0))))
             is_dead = f.get("is_dead", 0.0)
             steps_since_food = f.get("steps_since_food", 0.0)
             df = min(((fx - xc) ** 2 + (fy - yc) ** 2) ** 0.5, 1.5) if (fx or fy) else 0.0
